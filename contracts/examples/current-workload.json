@@ -1,0 +1,8 @@
+{
+  "locationId": "demo",
+  "vehicleCount": 125,
+  "observedAt": "2026-07-20T08:00:00.000Z",
+  "receivedAt": "2026-07-20T08:00:01.000Z",
+  "freshness": "fresh",
+  "sequence": 3
+}

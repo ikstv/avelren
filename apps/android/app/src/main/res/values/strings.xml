@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Avelren</string>
+    <string name="placeholder_title">Avelren</string>
+    <string name="placeholder_loading">Завантаження демонстраційних даних…</string>
+    <string name="placeholder_count">Демонстраційне значення: %1$d</string>
+</resources>

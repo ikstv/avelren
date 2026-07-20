@@ -1,0 +1,186 @@
+name: Перевірки / Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  metadata:
+    name: Метадані та контракти / Metadata and contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Отримати код / Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Перевірити пробіли / Check whitespace
+        shell: bash
+        run: |
+          if git grep -nI -E '[[:blank:]]+$' -- .; then
+            echo "Знайдено кінцеві пробіли / Trailing whitespace found"
+            exit 1
+          fi
+
+      - name: Перевірити JSON / Validate JSON
+        shell: bash
+        run: |
+          for file in contracts/examples/*.json; do
+            python3 -m json.tool "$file" >/dev/null
+          done
+
+      - name: Перевірити OpenAPI YAML / Validate OpenAPI YAML
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("contracts/openapi.yaml")
+          content = path.read_text(encoding="utf-8")
+          try:
+              import yaml
+          except ModuleNotFoundError:
+              required_roots = ("openapi: 3.1.0", "info:", "paths:", "components:")
+              missing = [item for item in required_roots if item not in content]
+              if missing or "\t" in content:
+                  raise SystemExit(
+                      "OpenAPI structural validation failed: " + ", ".join(missing)
+                  )
+          else:
+              document = yaml.safe_load(content)
+              if not isinstance(document, dict):
+                  raise SystemExit("OpenAPI root must be a mapping")
+              if document.get("openapi") != "3.1.0":
+                  raise SystemExit("OpenAPI version must be 3.1.0")
+          PY
+
+      - name: Перевірити політики каркаса / Validate scaffold policies
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          required = [
+              "README.md",
+              "CONTRIBUTING.md",
+              "SECURITY.md",
+              "docs/architecture.md",
+              "docs/threat-model.md",
+              "contracts/openapi.yaml",
+              "contracts/examples/current-workload.json",
+              ".env.example",
+              "apps/android/gradlew",
+              "apps/android/gradle/wrapper/gradle-wrapper.jar",
+          ]
+          missing = [path for path in required if not Path(path).is_file()]
+          if missing:
+              raise SystemExit(f"Missing required files: {', '.join(missing)}")
+
+          readme = Path("README.md").read_text(encoding="utf-8")
+          ua = readme.find("## Українська")
+          en = readme.find("## English")
+          if ua < 0 or en < 0 or ua >= en:
+              raise SystemExit("README must contain the complete UA section before EN")
+
+          public_docs = "\n".join(
+              Path(path).read_text(encoding="utf-8")
+              for path in [
+                  "README.md",
+                  "CONTRIBUTING.md",
+                  "SECURITY.md",
+                  "docs/architecture.md",
+                  "docs/threat-model.md",
+                  "contracts/openapi.yaml",
+              ]
+          )
+          if "відкрите джерело" not in public_docs:
+              raise SystemExit("UA source-neutral wording is missing")
+          if "publicly accessible external source" not in public_docs:
+              raise SystemExit("EN source-neutral wording is missing")
+
+          env_values = {}
+          for raw_line in Path(".env.example").read_text(encoding="utf-8").splitlines():
+              line = raw_line.strip()
+              if not line or line.startswith("#") or "=" not in line:
+                  continue
+              key, value = line.split("=", 1)
+              env_values[key] = value
+          if int(env_values["POLL_INTERVAL_SECONDS"]) < 60:
+              raise SystemExit("POLL_INTERVAL_SECONDS must be at least 60")
+          if int(env_values["THRESHOLD_STEP"]) != 50:
+              raise SystemExit("THRESHOLD_STEP must be 50 in the first milestone")
+
+          example = json.loads(
+              Path("contracts/examples/current-workload.json").read_text(encoding="utf-8")
+          )
+          expected_keys = {
+              "locationId",
+              "vehicleCount",
+              "observedAt",
+              "receivedAt",
+              "freshness",
+              "sequence",
+          }
+          if set(example) != expected_keys:
+              raise SystemExit("Workload example does not match the API DTO")
+          if not 0 <= example["vehicleCount"] <= 1_000_000:
+              raise SystemExit("Example vehicleCount is outside the supported range")
+          if example["freshness"] not in {"fresh", "stale", "unknown"}:
+              raise SystemExit("Example freshness is invalid")
+
+          openapi = Path("contracts/openapi.yaml").read_text(encoding="utf-8")
+          for route in ("/v1/health:", "/v1/workload:"):
+              if route not in openapi:
+                  raise SystemExit(f"Missing OpenAPI route: {route}")
+          PY
+
+  api:
+    name: Сервер / API
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: services/api
+    steps:
+      - name: Отримати код / Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Встановити залежності / Install dependencies
+        run: npm ci
+
+      - name: Перевірити типи / Typecheck
+        run: npm run typecheck
+
+      - name: Запустити тести / Run tests
+        run: npm test
+
+      - name: Зібрати сервер / Build server
+        run: npm run build
+
+      - name: Перевірити production-залежності / Audit production dependencies
+        run: npm audit --omit=dev
+
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Отримати код / Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Запустити unit-тести / Run unit tests
+        working-directory: apps/android
+        run: ./gradlew --no-daemon test

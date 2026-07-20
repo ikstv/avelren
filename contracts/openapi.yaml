@@ -1,0 +1,102 @@
+openapi: 3.1.0
+info:
+  title: Avelren API
+  version: 0.1.0
+  summary: Контракт сервера Avelren / Avelren server contract
+  description: |
+    UA:
+    Read-only API передає Android-клієнту нормалізований стан, отриманий
+    сервером із відкритого джерела. Android не звертається до відкритого
+    джерела напряму.
+
+    EN:
+    This read-only API serves normalized state to the Android client. The
+    server obtains data from a publicly accessible external source; Android
+    never contacts that source directly.
+servers:
+  - url: http://localhost:3000
+    description: Локальна розробка / Local development
+paths:
+  /v1/health:
+    get:
+      operationId: getHealth
+      summary: Перевірити стан / Check health
+      security: []
+      responses:
+        "200":
+          description: Процес працює / Process is running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              examples:
+                default:
+                  externalValue: ./examples/health-response.json
+  /v1/workload:
+    get:
+      operationId: getCurrentWorkload
+      summary: Отримати поточний стан / Get current workload
+      description: |
+        UA: Повертає кешований серверний стан і не запускає опитування джерела.
+        EN: Returns cached server state and never triggers a source poll.
+      security: []
+      responses:
+        "200":
+          description: Поточний нормалізований стан / Current normalized state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkloadSnapshot"
+              examples:
+                default:
+                  externalValue: ./examples/current-workload.json
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - service
+      properties:
+        status:
+          type: string
+          const: ok
+        service:
+          type: string
+          const: avelren-api
+    WorkloadSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        - locationId
+        - vehicleCount
+        - observedAt
+        - receivedAt
+        - freshness
+        - sequence
+      properties:
+        locationId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        vehicleCount:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+        observedAt:
+          type: string
+          format: date-time
+        receivedAt:
+          type: string
+          format: date-time
+        freshness:
+          type: string
+          enum:
+            - fresh
+            - stale
+            - unknown
+        sequence:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991

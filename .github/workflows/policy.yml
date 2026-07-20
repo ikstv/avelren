@@ -1,0 +1,95 @@
+name: Політика назв / Naming policy
+
+on:
+  push:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+
+concurrency:
+  group: policy-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bilingual-metadata:
+    name: Українська та English / Ukrainian and English
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Перевірити заголовки й описи / Validate titles and bodies
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+
+          allowed_types = (
+              "feat|fix|docs|test|refactor|perf|build|ci|chore|style|revert"
+          )
+          title_pattern = re.compile(
+              rf"^(?:{allowed_types})\([a-z0-9][a-z0-9_-]*\): "
+              rf"(?P<ua>[^/\n]+) / (?P<en>[^\n]+)$"
+          )
+          ukrainian_pattern = re.compile(r"[А-Яа-яІіЇїЄєҐґ]")
+          english_pattern = re.compile(r"[A-Za-z]")
+          comment_pattern = re.compile(r"<!--.*?-->", re.DOTALL)
+
+          failures = []
+
+          def validate_title(title, subject):
+              match = title_pattern.fullmatch(title.strip())
+              if not match:
+                  failures.append(
+                      f"{subject}: expected type(scope): Українська / English"
+                  )
+                  return
+              if not ukrainian_pattern.search(match.group("ua")):
+                  failures.append(f"{subject}: UA title must contain Ukrainian text")
+              if not english_pattern.search(match.group("en")):
+                  failures.append(f"{subject}: EN title must contain English text")
+
+          def validate_body(body, subject):
+              clean = comment_pattern.sub("", body or "").replace("\r\n", "\n")
+              ua_match = re.search(r"(?m)^UA:\s*$", clean)
+              en_match = re.search(r"(?m)^EN:\s*$", clean)
+              if not ua_match or not en_match or ua_match.start() >= en_match.start():
+                  failures.append(f"{subject}: body must contain UA first, then EN")
+                  return
+              ua_text = clean[ua_match.end():en_match.start()].strip()
+              en_text = clean[en_match.end():].strip()
+              if not ukrainian_pattern.search(ua_text):
+                  failures.append(f"{subject}: UA body is empty or not Ukrainian")
+              if not english_pattern.search(en_text):
+                  failures.append(f"{subject}: EN body is empty or not English")
+
+          if event_name == "pull_request":
+              pull_request = event["pull_request"]
+              validate_title(pull_request.get("title", ""), "pull request")
+              validate_body(pull_request.get("body", ""), "pull request")
+          elif event_name == "push" and not event.get("deleted", False):
+              for commit in event.get("commits", []):
+                  message = commit.get("message", "")
+                  subject, separator, body = message.partition("\n")
+                  short_id = commit.get("id", "unknown")[:12]
+                  validate_title(subject, f"commit {short_id}")
+                  validate_body(body if separator else "", f"commit {short_id}")
+
+          if failures:
+              print("Policy violations / Порушення політики:")
+              for failure in failures:
+                  print(f"- {failure}")
+              raise SystemExit(1)
+
+          print("Bilingual metadata policy passed / Двомовну політику виконано")
+          PY
