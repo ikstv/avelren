@@ -78,6 +78,16 @@ paths:
                 platform: { type: string, enum: [android] }
                 locale: { type: string, minLength: 2, maxLength: 35 }
       responses:
+        '200':
+          description: Registration request accepted without issuing a credential
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: { type: string, enum: [registered] }
         '201':
           description: Installation registered; credential is returned only on creation
           content:

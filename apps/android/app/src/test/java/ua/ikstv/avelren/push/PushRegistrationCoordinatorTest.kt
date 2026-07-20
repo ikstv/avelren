@@ -31,6 +31,14 @@ class PushRegistrationCoordinatorTest {
         assertEquals(3, api.calls)
     }
 
+    @Test fun `ambiguous existing registration does not retry or expect a credential`() = runBlocking {
+        val identity = FakeIdentity()
+        val api = FakeApi(registrationCredential = null)
+        PushRegistrationCoordinator(identity, api).registerToken("t".repeat(20), "uk-UA")
+        assertEquals(1, api.calls)
+        assertEquals(null, identity.saved)
+    }
+
     private class FakeIdentity(var saved: String? = null) : PushIdentityStore {
         val values = mutableListOf<String>()
         override fun installationId(): String = "i".repeat(32)
@@ -38,14 +46,17 @@ class PushRegistrationCoordinatorTest {
         override fun saveCredential(credential: String) { saved = credential; values += credential }
     }
 
-    private class FakeApi(var failures: Int = 0) : PushRegistrationApi {
+    private class FakeApi(
+        var failures: Int = 0,
+        private val registrationCredential: String? = "c".repeat(43),
+    ) : PushRegistrationApi {
         var calls = 0
         var rotated = false
         var didHeartbeat = false
         override suspend fun register(installationId: String, token: String, locale: String): RegistrationResult {
             calls += 1
             if (failures-- > 0) throw PushRegistrationException()
-            return RegistrationResult("c".repeat(43))
+            return RegistrationResult(registrationCredential)
         }
         override suspend fun rotate(installationId: String, credential: String, token: String) { rotated = true }
         override suspend fun heartbeat(installationId: String, credential: String, locale: String) {

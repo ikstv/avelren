@@ -71,37 +71,43 @@ export class PostgresDeviceRegistrationService {
     installationCredential?: string;
   }>> {
     const encrypted = this.tokenCrypto.encrypt(input.token);
-    const credential = generateInstallationCredential();
-    const verifier = await hashInstallationCredential(credential);
-    const result = await this.pool.query(
-      `INSERT INTO push_devices (
-         installation_id, token_ciphertext, token_iv, token_auth_tag,
-         token_fingerprint, encryption_key_id, credential_salt, credential_hash,
-         platform, locale
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       ON CONFLICT (token_fingerprint) DO UPDATE SET
-         installation_id = EXCLUDED.installation_id,
-         token_ciphertext = EXCLUDED.token_ciphertext,
-         token_iv = EXCLUDED.token_iv,
-         token_auth_tag = EXCLUDED.token_auth_tag,
-         encryption_key_id = EXCLUDED.encryption_key_id,
-         credential_salt = EXCLUDED.credential_salt,
-         credential_hash = EXCLUDED.credential_hash,
-         platform = EXCLUDED.platform,
-         locale = EXCLUDED.locale,
-         enabled = TRUE,
-         disabled_at = NULL,
-         disabled_reason = NULL,
-         last_seen_at = clock_timestamp(),
-         updated_at = clock_timestamp()
-       RETURNING id`,
-      [input.installationId, encrypted.ciphertext, encrypted.iv, encrypted.authTag,
-        encrypted.fingerprint, encrypted.keyId, verifier.salt, verifier.hash,
-        input.platform, input.locale],
-    );
-    return result.rowCount === 1
-      ? { status: "registered", installationCredential: credential }
-      : { status: "registered" };
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO push_devices (
+           installation_id, token_ciphertext, token_iv, token_auth_tag,
+           token_fingerprint, encryption_key_id, credential_salt, credential_hash,
+           platform, locale
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT DO NOTHING
+         RETURNING id::text`,
+        [input.installationId, encrypted.ciphertext, encrypted.iv, encrypted.authTag,
+          encrypted.fingerprint, encrypted.keyId, Buffer.alloc(16), Buffer.alloc(32),
+          input.platform, input.locale],
+      );
+      const row = inserted.rows[0];
+      if (!row) {
+        await client.query("COMMIT");
+        return { status: "registered" };
+      }
+
+      const credential = generateInstallationCredential();
+      const verifier = await hashInstallationCredential(credential);
+      const updated = await client.query(
+        `UPDATE push_devices SET credential_salt = $1, credential_hash = $2
+         WHERE id = $3`,
+        [verifier.salt, verifier.hash, row.id],
+      );
+      if (updated.rowCount !== 1) throw new Error("Push registration failed");
+      await client.query("COMMIT");
+      return { status: "registered", installationCredential: credential };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   public async rotateToken(installationId: string, credential: string, token: string): Promise<void> {

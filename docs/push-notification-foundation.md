@@ -14,6 +14,10 @@ FCM-токени шифруються AES-256-GCM. HMAC-SHA-256 fingerprint ви
 credential генерується випадково, повертається лише під час першої успішної
 реєстрації та зберігається сервером як salted `scrypt` verifier. Android зберігає
 credential у ciphertext, захищеному Android Keystore, і не зберігає FCM-токен.
+Повторна первинна реєстрація ніколи не змінює наявний запис і не перевидає
+credential. Якщо одноразову відповідь втрачено, Android завершує обмежену спробу
+без credential; відновлення наявного запису можливе лише автентифікованим шляхом.
+Неавторизованого reset або recovery endpoint немає.
 
 `PUSH_ENABLED=false` є безпечним локальним режимом. При `PUSH_ENABLED=true`
 сервер вимагає PostgreSQL, `FCM_PROJECT_ID`, keyring, fingerprint key та Application
@@ -51,6 +55,10 @@ rotation. A random installation credential is returned only by the first
 successful registration and stored server-side as a salted `scrypt` verifier.
 Android keeps only Keystore-protected credential ciphertext and does not persist
 the FCM token.
+Repeated initial registration never mutates an existing row or reissues a
+credential. If the one-time response is lost, Android finishes its bounded
+attempt without a credential; recovering the existing row requires an
+authenticated path. No unauthenticated reset or recovery endpoint exists.
 
 `PUSH_ENABLED=false` is the safe local mode. Enabling push requires PostgreSQL,
 `FCM_PROJECT_ID`, the keyring, fingerprint key, and Application Default

@@ -5,13 +5,20 @@ import type { RegistrationService } from "../../src/push/routes.js";
 class FakeRegistrationService implements RegistrationService {
   registrations = 0;
   rotations = 0;
-  async register(): Promise<{ status: "registered"; installationCredential: string }> {
+  async register(): Promise<{ status: "registered"; installationCredential?: string }> {
     this.registrations += 1;
     return { status: "registered", installationCredential: "c".repeat(43) };
   }
   async rotateToken(): Promise<void> { this.rotations += 1; }
   async heartbeat(): Promise<void> {}
   async disable(): Promise<void> {}
+}
+
+class ConflictRegistrationService extends FakeRegistrationService {
+  override async register(): Promise<{ status: "registered" }> {
+    this.registrations += 1;
+    return { status: "registered" };
+  }
 }
 
 const input = {
@@ -40,6 +47,15 @@ describe("push registration routes", () => {
     expect(response.statusCode).toBe(400);
     expect(response.body).not.toContain("token-value");
     expect(service.registrations).toBe(0);
+    await app.close();
+  });
+
+  it("returns the same neutral response for an existing installation conflict", async () => {
+    const app = buildApp({ pushRegistrationService: new ConflictRegistrationService() });
+    const response = await app.inject({ method: "POST", url: "/v1/push/installations", payload: input });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ status: "registered" });
+    expect(response.body).not.toContain("token-value");
     await app.close();
   });
 

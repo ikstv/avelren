@@ -19,15 +19,18 @@ integration("PostgreSQL notification outbox", () => {
   const locationId = `push-test-${process.pid}`;
   const eventId = "b".repeat(56) + process.pid.toString(16).padStart(8, "0").slice(-8);
   const installationId = `integration_installation_${process.pid}_000000`;
+  const initialToken = `integration-token-${process.pid}-1234567890`;
+  let initialCredential = "";
 
   beforeAll(async () => {
     await runMigrations(pool);
-    await registrations.register({
+    const result = await registrations.register({
       installationId,
-      token: `integration-token-${process.pid}-1234567890`,
+      token: initialToken,
       platform: "android",
       locale: "uk-UA",
     });
+    initialCredential = result.installationCredential ?? "";
   });
 
   afterAll(async () => {
@@ -50,19 +53,77 @@ integration("PostgreSQL notification outbox", () => {
     expect(result.rows[0]?.count).toBe("1");
   });
 
-  it("retries initial registration idempotently for the same token", async () => {
+  it("returns the installation credential only for the created row", () => {
+    expect(initialCredential).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  it("keeps every stored field unchanged on repeated unauthenticated registration", async () => {
+    const before = await deviceState(installationId);
     const retried = await registrations.register({
       installationId,
-      token: `integration-token-${process.pid}-1234567890`,
+      token: `different-token-${process.pid}-1234567890`,
       platform: "android",
-      locale: "uk-UA",
+      locale: "en-US",
     });
-    expect(retried.installationCredential).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(retried).toEqual({ status: "registered" });
+    expect(await deviceState(installationId)).toEqual(before);
+  });
+
+  it("does not transfer a token fingerprint to another installation", async () => {
+    const otherId = `integration_installation_${process.pid}_owner000`;
+    const otherToken = `integration-token-owner-${process.pid}-1234567890`;
+    const created = await registrations.register({
+      installationId: otherId, token: otherToken, platform: "android", locale: "uk-UA",
+    });
+    expect(created.installationCredential).toBeDefined();
+    const before = await deviceState(otherId);
+    const conflict = await registrations.register({
+      installationId: `integration_installation_${process.pid}_attacker`,
+      token: otherToken, platform: "android", locale: "en-US",
+    });
+    expect(conflict).toEqual({ status: "registered" });
+    expect(await deviceState(otherId)).toEqual(before);
+  });
+
+  it("permits authenticated rotation without changing the credential verifier", async () => {
+    const before = await deviceState(installationId);
+    await registrations.rotateToken(
+      installationId, initialCredential, `rotated-token-${process.pid}-1234567890`,
+    );
+    const after = await deviceState(installationId);
+    expect(after.token_fingerprint).not.toBe(before.token_fingerprint);
+    expect(after.credential_salt).toBe(before.credential_salt);
+    expect(after.credential_hash).toBe(before.credential_hash);
+    await expect(registrations.rotateToken(
+      installationId, "x".repeat(43), `rejected-token-${process.pid}-1234567890`,
+    )).rejects.toThrow("Installation authentication failed");
+    expect(await deviceState(installationId)).toEqual(after);
+  });
+
+  it("does not re-enable a disabled installation through initial registration", async () => {
+    await registrations.disable(installationId, initialCredential);
+    const before = await deviceState(installationId);
+    const result = await registrations.register({
+      installationId, token: initialToken, platform: "android", locale: "en-US",
+    });
+    expect(result).toEqual({ status: "registered" });
+    expect(await deviceState(installationId)).toEqual(before);
+  });
+
+  it("serializes concurrent initial registrations at the database constraints", async () => {
+    const concurrentId = `integration_installation_${process.pid}_parallel`;
+    const concurrentToken = `integration-token-parallel-${process.pid}-1234567890`;
+    const results = await Promise.all(Array.from({ length: 2 }, () => registrations.register({
+      installationId: concurrentId, token: concurrentToken, platform: "android", locale: "uk-UA",
+    })));
+    expect(results.filter((result) => result.installationCredential !== undefined)).toHaveLength(1);
     const rows = await pool.query<{ count: string }>(
-      "SELECT COUNT(*)::text AS count FROM push_devices WHERE installation_id = $1",
-      [installationId],
+      "SELECT COUNT(*)::text AS count FROM push_devices WHERE installation_id = $1", [concurrentId],
     );
     expect(rows.rows[0]?.count).toBe("1");
+    const winner = results.find((result) => result.installationCredential)?.installationCredential;
+    expect(winner).toBeDefined();
+    if (winner) await registrations.heartbeat(concurrentId, winner, "en-US");
   });
 
   it("allows only one concurrent worker to claim the row", async () => {
@@ -96,4 +157,19 @@ integration("PostgreSQL notification outbox", () => {
     );
     expect(after.rows[0]?.count).toBe(before.rows[0]?.count);
   });
+
+  async function deviceState(id: string): Promise<Readonly<{
+    token_fingerprint: string; credential_salt: string; credential_hash: string;
+    platform: string; locale: string; enabled: boolean; disabled_at: string | null;
+    disabled_reason: string | null;
+  }>> {
+    const result = await pool.query(
+      `SELECT token_fingerprint, encode(credential_salt, 'hex') AS credential_salt,
+        encode(credential_hash, 'hex') AS credential_hash, platform, locale, enabled,
+        disabled_at::text, disabled_reason FROM push_devices WHERE installation_id = $1`, [id],
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error("Expected integration device row");
+    return row;
+  }
 });

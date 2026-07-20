@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import { parsePushConfig } from "../../src/push/config.js";
 import { hashInstallationCredential, verifyInstallationCredential } from "../../src/push/credential-hasher.js";
 import { parseRegistrationInput } from "../../src/push/device-registration.js";
+import { TokenCrypto } from "../../src/push/token-crypto.js";
 
 const base64Key = Buffer.alloc(32, 7).toString("base64");
+const otherBase64Key = Buffer.alloc(32, 8).toString("base64");
+const legacyBase64Key = Buffer.alloc(32, 9).toString("base64");
 
 describe("push configuration", () => {
   it("is disabled without production defaults", () => {
@@ -20,10 +23,69 @@ describe("push configuration", () => {
       PUSH_ENABLED: "true",
       FCM_PROJECT_ID: "avelren-test-project",
       PUSH_TOKEN_ACTIVE_KEY_ID: "v2",
-      PUSH_TOKEN_ENCRYPTION_KEYS: `v1:${base64Key},v2:${base64Key}`,
-      PUSH_TOKEN_FINGERPRINT_KEY: base64Key,
+      PUSH_TOKEN_ENCRYPTION_KEYS: `v1:${legacyBase64Key},v2:${base64Key}`,
+      PUSH_TOKEN_FINGERPRINT_KEY: otherBase64Key,
     });
     expect(config.keyring?.encryptionKeys.size).toBe(2);
+  });
+
+  it("rejects a fingerprint key equal to the active or a legacy encryption key", () => {
+    const configuration = {
+      PUSH_ENABLED: "true",
+      FCM_PROJECT_ID: "avelren-test-project",
+      PUSH_TOKEN_ACTIVE_KEY_ID: "v2",
+      PUSH_TOKEN_ENCRYPTION_KEYS: `v1:${legacyBase64Key},v2:${base64Key}`,
+    };
+    expect(() => parsePushConfig({
+      ...configuration, PUSH_TOKEN_FINGERPRINT_KEY: base64Key,
+    })).toThrow("Push cryptographic keys must be distinct");
+    expect(() => parsePushConfig({
+      ...configuration, PUSH_TOKEN_FINGERPRINT_KEY: legacyBase64Key,
+    })).toThrow("Push cryptographic keys must be distinct");
+  });
+
+  it("rejects duplicate encryption material and non-canonical base64", () => {
+    expect(() => parsePushConfig({
+      PUSH_ENABLED: "true",
+      FCM_PROJECT_ID: "avelren-test-project",
+      PUSH_TOKEN_ACTIVE_KEY_ID: "v2",
+      PUSH_TOKEN_ENCRYPTION_KEYS: `v1:${base64Key},v2:${base64Key}`,
+      PUSH_TOKEN_FINGERPRINT_KEY: otherBase64Key,
+    })).toThrow("Push cryptographic keys must be distinct");
+    const nonCanonical = `${base64Key.slice(0, -2)}d=`;
+    expect(Buffer.from(nonCanonical, "base64")).toEqual(Buffer.from(base64Key, "base64"));
+    expect(() => parsePushConfig({
+      PUSH_ENABLED: "true",
+      FCM_PROJECT_ID: "avelren-test-project",
+      PUSH_TOKEN_ACTIVE_KEY_ID: "v2",
+      PUSH_TOKEN_ENCRYPTION_KEYS: `v2:${nonCanonical}`,
+      PUSH_TOKEN_FINGERPRINT_KEY: otherBase64Key,
+    })).toThrow("Invalid push cryptography configuration");
+  });
+
+  it("validates explicitly supplied keys even while push is disabled", () => {
+    expect(() => parsePushConfig({
+      PUSH_ENABLED: "false",
+      PUSH_TOKEN_ACTIVE_KEY_ID: "v1",
+      PUSH_TOKEN_ENCRYPTION_KEYS: `v1:${base64Key}`,
+      PUSH_TOKEN_FINGERPRINT_KEY: base64Key,
+    })).toThrow("Push cryptographic keys must be distinct");
+  });
+
+  it("enforces key separation when crypto is constructed directly", () => {
+    const material = Buffer.alloc(32, 21);
+    expect(() => new TokenCrypto({
+      activeKeyId: "v1", encryptionKeys: new Map([["v1", material]]),
+      fingerprintKey: Buffer.from(material),
+    })).toThrow("Push cryptographic keys must be distinct");
+    try {
+      new TokenCrypto({
+        activeKeyId: "v1", encryptionKeys: new Map([["v1", material]]),
+        fingerprintKey: Buffer.from(material),
+      });
+    } catch (error) {
+      expect(String(error)).not.toContain(material.toString("base64"));
+    }
   });
 });
 

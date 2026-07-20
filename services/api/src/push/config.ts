@@ -1,4 +1,4 @@
-import type { TokenKeyring } from "./token-crypto.js";
+import { validateTokenKeyring, type TokenKeyring } from "./token-crypto.js";
 
 const readInt = (env: NodeJS.ProcessEnv, name: string, fallback: number,
   minimum: number, maximum: number): number => {
@@ -17,7 +17,9 @@ const decodeKey = (value: string): Buffer => {
     throw new Error("Invalid push cryptography configuration");
   }
   const key = Buffer.from(value, "base64");
-  if (key.length !== 32) throw new Error("Invalid push cryptography configuration");
+  if (key.length !== 32 || key.toString("base64") !== value) {
+    throw new Error("Invalid push cryptography configuration");
+  }
   return key;
 };
 
@@ -55,14 +57,14 @@ export function parsePushConfig(env: NodeJS.ProcessEnv): PushConfig {
   if (base.claimTtlMs < base.providerTimeoutMs + 5_000) {
     throw new Error("PUSH_CLAIM_TTL_MS must exceed the provider timeout");
   }
-  if (!enabled) return base;
-
   const projectId = env.FCM_PROJECT_ID;
   const activeKeyId = env.PUSH_TOKEN_ACTIVE_KEY_ID;
   const serializedKeys = env.PUSH_TOKEN_ENCRYPTION_KEYS;
   const fingerprintKey = env.PUSH_TOKEN_FINGERPRINT_KEY;
-  if (!projectId || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(projectId) ||
-    !activeKeyId || !serializedKeys || !fingerprintKey) {
+  const hasCryptoConfiguration = [activeKeyId, serializedKeys, fingerprintKey]
+    .some((value) => value !== undefined && value !== "");
+  if (!enabled && !hasCryptoConfiguration) return base;
+  if (!activeKeyId || !serializedKeys || !fingerprintKey) {
     throw new Error("Push is enabled but required configuration is incomplete");
   }
   const encryptionKeys = new Map<string, Buffer>();
@@ -74,9 +76,15 @@ export function parsePushConfig(env: NodeJS.ProcessEnv): PushConfig {
     encryptionKeys.set(keyId, decodeKey(item.slice(separator + 1)));
   }
   if (!encryptionKeys.has(activeKeyId)) throw new Error("Invalid push cryptography configuration");
+  const keyring = { activeKeyId, encryptionKeys, fingerprintKey: decodeKey(fingerprintKey) };
+  validateTokenKeyring(keyring);
+  if (!enabled) return base;
+  if (!projectId || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(projectId)) {
+    throw new Error("Push is enabled but required configuration is incomplete");
+  }
   return {
     ...base,
     projectId,
-    keyring: { activeKeyId, encryptionKeys, fingerprintKey: decodeKey(fingerprintKey) },
+    keyring,
   };
 }

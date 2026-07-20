@@ -24,19 +24,39 @@ export interface TokenKeyring {
   readonly fingerprintKey: Buffer;
 }
 
-export class TokenCrypto {
-  public constructor(private readonly keyring: TokenKeyring) {
-    const activeKey = keyring.encryptionKeys.get(keyring.activeKeyId);
-    if (!activeKey || activeKey.length !== KEY_BYTES ||
-      keyring.fingerprintKey.length !== KEY_BYTES ||
-      !/^[A-Za-z0-9._-]{1,64}$/.test(keyring.activeKeyId)) {
+const equalKeyMaterial = (left: Buffer, right: Buffer): boolean =>
+  left.length === right.length && timingSafeEqual(left, right);
+
+export function validateTokenKeyring(keyring: TokenKeyring): void {
+  const activeKey = keyring.encryptionKeys.get(keyring.activeKeyId);
+  if (!activeKey || activeKey.length !== KEY_BYTES ||
+    keyring.fingerprintKey.length !== KEY_BYTES ||
+    !/^[A-Za-z0-9._-]{1,64}$/.test(keyring.activeKeyId)) {
+    throw new Error("Invalid push cryptography configuration");
+  }
+  const encryptionKeys = [...keyring.encryptionKeys.entries()];
+  for (let index = 0; index < encryptionKeys.length; index += 1) {
+    const entry = encryptionKeys[index];
+    if (!entry) continue;
+    const [keyId, key] = entry;
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(keyId) || key.length !== KEY_BYTES) {
       throw new Error("Invalid push cryptography configuration");
     }
-    for (const [keyId, key] of keyring.encryptionKeys) {
-      if (!/^[A-Za-z0-9._-]{1,64}$/.test(keyId) || key.length !== KEY_BYTES) {
-        throw new Error("Invalid push cryptography configuration");
+    if (equalKeyMaterial(key, keyring.fingerprintKey)) {
+      throw new Error("Push cryptographic keys must be distinct");
+    }
+    for (let otherIndex = index + 1; otherIndex < encryptionKeys.length; otherIndex += 1) {
+      const other = encryptionKeys[otherIndex];
+      if (other && equalKeyMaterial(key, other[1])) {
+        throw new Error("Push cryptographic keys must be distinct");
       }
     }
+  }
+}
+
+export class TokenCrypto {
+  public constructor(private readonly keyring: TokenKeyring) {
+    validateTokenKeyring(keyring);
   }
 
   public encrypt(token: string): EncryptedToken {
