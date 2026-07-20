@@ -22,7 +22,9 @@ test_root="$(mktemp -d)"
 fake_bin="$test_root/bin"
 backup_tmp="$test_root/backup-tmp"
 mkdir -p "$fake_bin" "$backup_tmp"
-chmod 700 "$test_root" "$backup_tmp"
+# The inner root-only script is invoked through sudo; the unprivileged CI runner
+# must read its sanitized fixture logs and verify cleanup afterwards.
+chmod 755 "$test_root" "$backup_tmp"
 cleanup() {
   if [ "$(id -u)" -eq 0 ]; then
     rm -rf -- "$test_root"
