@@ -22,9 +22,7 @@ test_root="$(mktemp -d)"
 fake_bin="$test_root/bin"
 backup_tmp="$test_root/backup-tmp"
 mkdir -p "$fake_bin" "$backup_tmp"
-# The inner root-only script is invoked through sudo; the unprivileged CI runner
-# must read its sanitized fixture logs and verify cleanup afterwards.
-chmod 755 "$test_root" "$backup_tmp"
+chmod 700 "$test_root" "$backup_tmp"
 cleanup() {
   if [ "$(id -u)" -eq 0 ]; then
     rm -rf -- "$test_root"
@@ -85,6 +83,7 @@ fi
 root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$test_root/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$test_root/db-created" "FAKE_DB_DROPPED=$test_root/db-dropped")
 runner=()
 [ "$(id -u)" -eq 0 ] || runner=(sudo)
+backup_tmp_is_empty() { [ -z "$("${runner[@]}" find "$backup_tmp" -mindepth 1 -print -quit)" ]; }
 printf '%s\n' 'test' >"$test_root/env"
 printf '%s\n' 'test' >"$test_root/compose.yml"
 
@@ -93,33 +92,33 @@ at_warning=$((12 * 1024 * 1024 * 1024))
 at_hard_stop=$((14 * 1024 * 1024 * 1024))
 
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$root/scripts/backup/postgres-backup.sh" >"$test_root/below-warning.log" 2>&1
-if grep -Fq 'Warning: repository reached 12 GiB.' "$test_root/below-warning.log"; then
+if "${runner[@]}" grep -Fq 'Warning: repository reached 12 GiB.' "$test_root/below-warning.log"; then
   exit 1
 fi
-[ -z "$(find "$backup_tmp" -mindepth 1 -print -quit)" ]
+backup_tmp_is_empty
 
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$at_warning" "$root/scripts/backup/postgres-backup.sh" >"$test_root/at-warning.log" 2>&1
-grep -Fq 'Warning: repository reached 12 GiB.' "$test_root/at-warning.log"
-if grep -Fq 'Backup stopped: repository reached the 14 GiB hard limit.' "$test_root/at-warning.log"; then
+"${runner[@]}" grep -Fq 'Warning: repository reached 12 GiB.' "$test_root/at-warning.log"
+if "${runner[@]}" grep -Fq 'Backup stopped: repository reached the 14 GiB hard limit.' "$test_root/at-warning.log"; then
   exit 1
 fi
-[ -z "$(find "$backup_tmp" -mindepth 1 -print -quit)" ]
+backup_tmp_is_empty
 
 set +e
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$at_hard_stop" "$root/scripts/backup/postgres-backup.sh" >"$test_root/at-hard-stop.log" 2>&1
 hard_stop_status=$?
 set -e
 [ "$hard_stop_status" -ne 0 ]
-grep -Fq 'Backup stopped: repository reached the 14 GiB hard limit.' "$test_root/at-hard-stop.log"
-[ -z "$(find "$backup_tmp" -mindepth 1 -print -quit)" ]
+"${runner[@]}" grep -Fq 'Backup stopped: repository reached the 14 GiB hard limit.' "$test_root/at-hard-stop.log"
+backup_tmp_is_empty
 
 set +e
 "${runner[@]}" env "${root_env[@]}" FAKE_RESTIC_FAIL=1 "$root/scripts/backup/postgres-backup.sh" >"$test_root/failure.log" 2>&1
 failure_status=$?
 set -e
 [ "$failure_status" -ne 0 ]
-[ -z "$(find "$backup_tmp" -mindepth 1 -print -quit)" ]
-if grep -Eq 'fake-secret|password|token' "$test_root/below-warning.log" "$test_root/at-warning.log" "$test_root/at-hard-stop.log" "$test_root/failure.log"; then
+backup_tmp_is_empty
+if "${runner[@]}" grep -Eq 'fake-secret|password|token' "$test_root/below-warning.log" "$test_root/at-warning.log" "$test_root/at-hard-stop.log" "$test_root/failure.log"; then
   exit 1
 fi
 
