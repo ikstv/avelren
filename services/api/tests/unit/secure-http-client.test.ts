@@ -17,7 +17,7 @@ describe("secure external HTTPS client", () => {
   it("bounds DNS resolution time without starting HTTP", async () => {
     const transport = fakeTransport(ok());
     const resolver = { resolve: vi.fn(() => new Promise<never>(() => undefined)) } as AddressResolver;
-    await expect(client(transport, resolver, 1).fetch({}, new AbortController().signal)).rejects.toMatchObject({ code: "network" });
+    await expect(client(transport, resolver, 1).fetch({}, new AbortController().signal)).rejects.toMatchObject({ code: "timeout" });
     expect(transport.request).not.toHaveBeenCalled();
   });
   it("pins a validated address and uses minimal headers", async () => {

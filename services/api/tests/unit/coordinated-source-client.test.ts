@@ -34,6 +34,17 @@ describe("CoordinatedExternalSourceClient", () => {
     await expect(make(state, source, { parse: vi.fn() }).fetch(new AbortController().signal)).rejects.toThrow("External source collection cycle failed");
     expect(state.recordFailure).toHaveBeenCalledWith(reservation, expect.objectContaining({ minimumIntervalMs: 60_000, retryAfterMs: 120_000 }));
   });
+  it("does not retry a timed-out request in the same cycle", async () => {
+    const state = fakeState(reservation);
+    const source = { fetch: vi.fn().mockRejectedValue(new ExternalSourceHttpError("timeout")) };
+    await expect(make(state, source, { parse: vi.fn() }).fetch(
+      new AbortController().signal,
+    )).rejects.toThrow("External source collection cycle failed");
+    expect(source.fetch).toHaveBeenCalledOnce();
+    expect(state.recordFailure).toHaveBeenCalledWith(reservation, expect.objectContaining({
+      minimumIntervalMs: 60_000,
+    }));
+  });
   it("does not expose collector failure", async () => {
     const state = fakeState(reservation);
     const source = { fetch: vi.fn().mockResolvedValue({ status: "ok", body: Buffer.from("safe"), receivedAt: new Date(), metadata: {} }) };

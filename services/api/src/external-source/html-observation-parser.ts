@@ -20,7 +20,7 @@ export class HtmlObservationParser {
     const $ = load(document, { scriptingEnabled: false });
     const countNodes = $(this.options.countSelector);
     if (countNodes.length !== 1) throw parseError();
-    const normalizedCount = countNodes.text().replace(/\p{White_Space}+/gu, "");
+    const normalizedCount = countNodes.text().trim();
     if (!/^(0|[1-9][0-9]*)$/u.test(normalizedCount)) throw parseError();
     const vehicleCount = Number(normalizedCount);
     if (!Number.isSafeInteger(vehicleCount)) throw parseError();
