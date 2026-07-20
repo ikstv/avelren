@@ -51,7 +51,7 @@ cat >"$fake_bin/rclone" <<'FAKE_RCLONE'
 #!/usr/bin/env bash
 set -eu
 case "$*" in
-  *'size --json'*) printf '%s\n' '{"bytes":0}' ;;
+  *'size --json'*) printf '{"bytes":%s}\n' "${FAKE_REPOSITORY_BYTES:-0}" ;;
   *) exit 0 ;;
 esac
 FAKE_RCLONE
@@ -86,7 +86,29 @@ runner=()
 printf '%s\n' 'test' >"$test_root/env"
 printf '%s\n' 'test' >"$test_root/compose.yml"
 
-"${runner[@]}" env "${root_env[@]}" "$root/scripts/backup/postgres-backup.sh" >"$test_root/success.log" 2>&1
+below_warning=$((12 * 1024 * 1024 * 1024 - 1))
+at_warning=$((12 * 1024 * 1024 * 1024))
+at_hard_stop=$((14 * 1024 * 1024 * 1024))
+
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$root/scripts/backup/postgres-backup.sh" >"$test_root/below-warning.log" 2>&1
+if grep -Fq 'Warning: repository reached 12 GiB.' "$test_root/below-warning.log"; then
+  exit 1
+fi
+[ -z "$(find "$backup_tmp" -mindepth 1 -print -quit)" ]
+
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$at_warning" "$root/scripts/backup/postgres-backup.sh" >"$test_root/at-warning.log" 2>&1
+grep -Fq 'Warning: repository reached 12 GiB.' "$test_root/at-warning.log"
+if grep -Fq 'Backup stopped: repository reached the 14 GiB hard limit.' "$test_root/at-warning.log"; then
+  exit 1
+fi
+[ -z "$(find "$backup_tmp" -mindepth 1 -print -quit)" ]
+
+set +e
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$at_hard_stop" "$root/scripts/backup/postgres-backup.sh" >"$test_root/at-hard-stop.log" 2>&1
+hard_stop_status=$?
+set -e
+[ "$hard_stop_status" -ne 0 ]
+grep -Fq 'Backup stopped: repository reached the 14 GiB hard limit.' "$test_root/at-hard-stop.log"
 [ -z "$(find "$backup_tmp" -mindepth 1 -print -quit)" ]
 
 set +e
@@ -95,7 +117,7 @@ failure_status=$?
 set -e
 [ "$failure_status" -ne 0 ]
 [ -z "$(find "$backup_tmp" -mindepth 1 -print -quit)" ]
-if grep -Eq 'fake-secret|password|token' "$test_root/success.log" "$test_root/failure.log"; then
+if grep -Eq 'fake-secret|password|token' "$test_root/below-warning.log" "$test_root/at-warning.log" "$test_root/at-hard-stop.log" "$test_root/failure.log"; then
   exit 1
 fi
 
