@@ -74,6 +74,28 @@ describe("poll interval validation", () => {
 });
 
 describe("PollingCoordinator", () => {
+  it("skips the source request when the distributed lease is unavailable", async () => {
+    const scheduler = new ManualScheduler();
+    const fetch = vi.fn<SourceClient<number>["fetch"]>();
+    const coordinator = new PollingCoordinator({
+      sourceClient: { fetch },
+      intervalMs: MINIMUM_POLL_INTERVAL_MS,
+      onValue: vi.fn(),
+      scheduler,
+      cycleLease: {
+        runIfAcquired: vi.fn().mockResolvedValue(false),
+      },
+    });
+
+    coordinator.start();
+
+    await vi.waitFor(() => {
+      expect(scheduler.pendingCount).toBe(1);
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    await coordinator.stop();
+  });
+
   it("polls immediately, then waits at least the configured interval", async () => {
     const scheduler = new ManualScheduler();
     const fetch = vi.fn<SourceClient<number>["fetch"]>()
