@@ -176,6 +176,7 @@ avelren/
 - [API contract](contracts/openapi.yaml)
 - [Contribution guide](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
+- [Production deployment](docs/deployment.md)
 
 ### Configuration
 

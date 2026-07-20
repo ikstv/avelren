@@ -1,0 +1,150 @@
+name: avelren
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=peer
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    shm_size: 256m
+    mem_limit: 1g
+    cpus: "1.0"
+    pids_limit: 256
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  api:
+    build:
+      context: ./services/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        export DATABASE_URL="$$(cat /run/secrets/database_url)"
+        exec node dist/server.js
+    environment:
+      NODE_ENV: production
+      AVELREN_STORAGE_MODE: postgres
+      AVELREN_DEMO_MODE: "false"
+      HOST: 0.0.0.0
+      PORT: "3000"
+      PUSH_ENABLED: "false"
+      APP_ATTESTATION_MODE: disabled
+      EXTERNAL_SOURCE_ENABLED: "false"
+      POLL_INTERVAL_SECONDS: "60"
+      THRESHOLD_STEP: "50"
+      AVELREN_INSTANCE_ID: ${AVELREN_INSTANCE_ID:?AVELREN_INSTANCE_ID is required}
+    secrets:
+      - database_url
+    expose:
+      - "3000"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    networks:
+      - edge
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/v1/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: "0.75"
+    pids_limit: 256
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  caddy:
+    build:
+      context: ./deploy/caddy
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required}
+      AVELREN_DOMAIN: ${AVELREN_DOMAIN:?AVELREN_DOMAIN is required}
+      XDG_CONFIG_HOME: /config
+      XDG_DATA_HOME: /data
+    ports:
+      - "80:8080"
+      - "443:8443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    networks:
+      - edge
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    cpus: "0.50"
+    pids_limit: 128
+    stop_grace_period: 30s
+    logging: *default-logging
+
+secrets:
+  postgres_password:
+    file: ${POSTGRES_PASSWORD_FILE:?POSTGRES_PASSWORD_FILE is required}
+  database_url:
+    file: ${DATABASE_URL_FILE:?DATABASE_URL_FILE is required}
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  edge:
+  backend:
+    internal: true
