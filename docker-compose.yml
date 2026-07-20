@@ -14,7 +14,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256 --auth-local=peer
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
     secrets:
       - postgres_password
     volumes:

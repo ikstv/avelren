@@ -19,7 +19,10 @@ npm run build
 npm audit --omit=dev
 cd ../..
 docker compose --env-file .env.production.example config --quiet
+./scripts/ci/production-compose-smoke.sh
 ```
+
+Disposable smoke test створює окремий Compose project, тимчасові secrets і чистий PostgreSQL volume. Він не запускає Caddy, не використовує production secrets або volumes і завжди видаляє лише власні тестові ресурси.
 
 ### Підготовка приватної конфігурації на сервері
 
@@ -34,10 +37,14 @@ DB_PASSWORD="$(openssl rand -hex 32)"
 printf '%s' "$DB_PASSWORD" > secrets/postgres_password
 printf 'postgresql://avelren:%s@postgres:5432/avelren' "$DB_PASSWORD" > secrets/database_url
 unset DB_PASSWORD
-chmod 600 secrets/postgres_password secrets/database_url
+chmod 600 secrets/postgres_password
+chown 10001:10001 secrets/database_url
+chmod 0400 secrets/database_url
 ```
 
-Відредагуйте `.env.production`: встановіть справжні `AVELREN_DOMAIN`, `ACME_EMAIL` та унікальний `AVELREN_INSTANCE_ID`. Пароль PostgreSQL у двох secret-файлах має залишатися однаковим. Не додавайте ці файли до Git.
+Відредагуйте `.env.production`: встановіть справжні `AVELREN_DOMAIN`, `ACME_EMAIL` та унікальний `AVELREN_INSTANCE_ID`. Пароль PostgreSQL у двох secret-файлах має залишатися однаковим. Каталог `secrets` залишається `root:root 0700`, `postgres_password` — `root:root 0600`, а `database_url` — `10001:10001 0400`, щоб non-root API міг прочитати лише свій file-backed secret. Не додавайте ці файли до Git.
+
+Офіційний PostgreSQL entrypoint запускає тимчасовий bootstrap server лише на Unix socket усередині контейнера та підключається як `POSTGRES_USER`, щоб створити `POSTGRES_DB`. Compose задає `--auth-host=scram-sha-256` для TCP connections і не перевизначає local authentication несумісним `peer`. PostgreSQL не має host port і залишається лише у внутрішній `backend`-мережі.
 
 ### Майбутній deployment
 
@@ -48,9 +55,13 @@ docker compose --env-file .env.production config --quiet
 docker compose --env-file .env.production build --pull
 docker compose --env-file .env.production up -d
 docker compose --env-file .env.production ps
+docker compose --env-file .env.production exec -T postgres sh -ec \
+  'test "$(psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --command "SELECT current_database()")" = "$POSTGRES_DB"'
 docker compose --env-file .env.production logs --tail=100 api postgres caddy
 curl --fail --silent --show-error "https://${AVELREN_DOMAIN}/v1/health"
 ```
+
+Команда після `ps` завершується успішно лише тоді, коли application database з назвою `POSTGRES_DB` існує. Якщо перевірка не пройшла, не запускайте або не перезапускайте API повторно до діагностики PostgreSQL initialization; не видаляйте production volume.
 
 Для зупинки без видалення даних:
 
@@ -90,7 +101,10 @@ npm run build
 npm audit --omit=dev
 cd ../..
 docker compose --env-file .env.production.example config --quiet
+./scripts/ci/production-compose-smoke.sh
 ```
+
+The disposable smoke test creates an isolated Compose project, temporary secrets, and a clean PostgreSQL volume. It does not start Caddy, does not use production secrets or volumes, and always removes only its own test resources.
 
 ### Prepare private configuration on the server
 
@@ -105,10 +119,14 @@ DB_PASSWORD="$(openssl rand -hex 32)"
 printf '%s' "$DB_PASSWORD" > secrets/postgres_password
 printf 'postgresql://avelren:%s@postgres:5432/avelren' "$DB_PASSWORD" > secrets/database_url
 unset DB_PASSWORD
-chmod 600 secrets/postgres_password secrets/database_url
+chmod 600 secrets/postgres_password
+chown 10001:10001 secrets/database_url
+chmod 0400 secrets/database_url
 ```
 
-Edit `.env.production` and set the real `AVELREN_DOMAIN`, `ACME_EMAIL`, and a unique `AVELREN_INSTANCE_ID`. The PostgreSQL password must remain identical in both secret files. Never add these files to Git.
+Edit `.env.production` and set the real `AVELREN_DOMAIN`, `ACME_EMAIL`, and a unique `AVELREN_INSTANCE_ID`. The PostgreSQL password must remain identical in both secret files. Keep `secrets` as `root:root 0700`, `postgres_password` as `root:root 0600`, and `database_url` as `10001:10001 0400` so the non-root API can read only its file-backed secret. Never add these files to Git.
+
+The official PostgreSQL entrypoint starts its temporary bootstrap server only on a Unix socket inside the container and connects as `POSTGRES_USER` to create `POSTGRES_DB`. Compose sets `--auth-host=scram-sha-256` for TCP connections and does not override local authentication with incompatible `peer`. PostgreSQL has no host port and remains isolated on the internal `backend` network.
 
 ### Future deployment
 
@@ -119,9 +137,13 @@ docker compose --env-file .env.production config --quiet
 docker compose --env-file .env.production build --pull
 docker compose --env-file .env.production up -d
 docker compose --env-file .env.production ps
+docker compose --env-file .env.production exec -T postgres sh -ec \
+  'test "$(psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --tuples-only --no-align --command "SELECT current_database()")" = "$POSTGRES_DB"'
 docker compose --env-file .env.production logs --tail=100 api postgres caddy
 curl --fail --silent --show-error "https://${AVELREN_DOMAIN}/v1/health"
 ```
+
+The command after `ps` succeeds only when the application database named by `POSTGRES_DB` exists. If it fails, do not repeatedly start or restart the API before diagnosing PostgreSQL initialization, and do not delete the production volume.
 
 Stop the stack without deleting data:
 

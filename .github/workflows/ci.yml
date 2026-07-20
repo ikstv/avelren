@@ -204,7 +204,7 @@ jobs:
   compose:
     name: Production Compose
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Отримати код / Check out code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -213,3 +213,6 @@ jobs:
 
       - name: Перевірити production Compose / Validate production Compose
         run: docker compose --env-file .env.production.example config --quiet
+
+      - name: Перевірити чисту ініціалізацію / Test clean initialization
+        run: ./scripts/ci/production-compose-smoke.sh
