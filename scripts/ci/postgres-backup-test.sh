@@ -4,7 +4,14 @@ set -Eeuo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 for script in scripts/backup/postgres-backup.sh scripts/backup/postgres-restore-drill.sh scripts/backup/postgres-backup-init.sh scripts/backup/postgres-backup-repo-check.sh scripts/backup/postgres-backup-prune.sh; do
   test -x "$root/$script"
+  # These are literal source-code assertions.
+  # shellcheck disable=SC2016
+  grep -Fq '. "$script_dir/restic-password-file.sh"' "$root/$script"
+  # These are literal source-code assertions.
+  # shellcheck disable=SC2016
+  grep -Fq 'validate_restic_password_file "$password_file"' "$root/$script"
 done
+test -r "$root/scripts/backup/restic-password-file.sh"
 grep -Fq '14 * 1024 * 1024 * 1024' "$root/scripts/backup/postgres-backup.sh"
 grep -Fq 'keep-daily 7' "$root/scripts/backup/postgres-backup-prune.sh"
 grep -Fq 'keep-weekly 4' "$root/scripts/backup/postgres-backup-prune.sh"
@@ -87,14 +94,62 @@ chmod 755 "$fake_bin"/*
 
 config="$test_root/rclone.conf"
 password="$test_root/restic_password"
-touch "$config" "$password"
-chmod 600 "$config" "$password"
+touch "$config"
+printf '%s' 'fixture-password' >"$password"
+chmod 600 "$config"
+chmod 400 "$password"
 if [ "$(id -u)" -ne 0 ]; then
   sudo chown root:root "$config" "$password"
 fi
 root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$test_root/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$test_root/db-created" "FAKE_DB_DROPPED=$test_root/db-dropped")
 runner=()
 [ "$(id -u)" -eq 0 ] || runner=(sudo)
+validator="$root/scripts/backup/restic-password-file.sh"
+validator_fixture="$test_root/validator-password"
+printf '%s' 'validator-fixture' >"$validator_fixture"
+"${runner[@]}" chown root:root "$validator_fixture"
+run_validator() {
+  # Expansion belongs to the isolated bash process.
+  # shellcheck disable=SC2016
+  "${runner[@]}" env VALIDATOR="$validator" PASSWORD_FILE="$1" bash -c '. "$VALIDATOR"; validate_restic_password_file "$PASSWORD_FILE"'
+}
+expect_validator_pass() {
+  "${runner[@]}" chmod "$1" "$validator_fixture"
+  run_validator "$validator_fixture"
+}
+expect_validator_fail() {
+  "${runner[@]}" chmod "$1" "$validator_fixture"
+  if run_validator "$validator_fixture" >/dev/null 2>&1; then
+    exit 1
+  fi
+}
+expect_validator_pass 400
+expect_validator_pass 600
+for rejected_mode in 0000 0440 0640 0644 0500; do
+  expect_validator_fail "$rejected_mode"
+done
+"${runner[@]}" chmod 400 "$validator_fixture"
+if [ "$(id -u)" -eq 0 ]; then
+  chown 65534:65534 "$validator_fixture"
+else
+  sudo chown "$(id -u):$(id -g)" "$validator_fixture"
+fi
+if run_validator "$validator_fixture" >/dev/null 2>&1; then
+  exit 1
+fi
+"${runner[@]}" chown root:root "$validator_fixture"
+empty_fixture="$test_root/empty-password"
+"${runner[@]}" touch "$empty_fixture"
+"${runner[@]}" chown root:root "$empty_fixture"
+"${runner[@]}" chmod 400 "$empty_fixture"
+if run_validator "$empty_fixture" >/dev/null 2>&1; then
+  exit 1
+fi
+symlink_fixture="$test_root/symlink-password"
+"${runner[@]}" ln -s "$validator_fixture" "$symlink_fixture"
+if run_validator "$symlink_fixture" >/dev/null 2>&1; then
+  exit 1
+fi
 backup_tmp_is_empty() { [ -z "$("${runner[@]}" find "$backup_tmp" -mindepth 1 -print -quit)" ]; }
 capture_is_runner_readable() { [ -r "$log_root" ] && [ -x "$log_root" ] && [ -f "$1" ] && [ -r "$1" ]; }
 printf '%s\n' 'test' >"$test_root/env"

@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Resolved relative to the installed script directory.
+# shellcheck disable=SC1091
+. "$script_dir/restic-password-file.sh"
 
 [ "$(id -u)" -eq 0 ] || { printf '%s\n' 'This drill must run as root.' >&2; exit 1; }
 compose_file="${AVELREN_COMPOSE_FILE:-/opt/avelren/docker-compose.yml}"
@@ -15,6 +19,7 @@ compose=(docker compose --env-file "$env_file" --file "$compose_file")
 repo="rclone:${remote}:Avelren Backups/restic"
 case "$remote" in (''|*[!A-Za-z0-9_-]*) exit 1;; esac
 [ "$production_db" = avelren ] || { printf '%s\n' 'Production database name must remain avelren.' >&2; exit 1; }
+validate_restic_password_file "$password_file" || exit 1
 install -d -o root -g root -m 700 "$tmp_root" "$(dirname "$lock_file")"
 exec 9>"$lock_file"
 flock -n 9 || { printf '%s\n' 'Another backup operation is running.' >&2; exit 1; }

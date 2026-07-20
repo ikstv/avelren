@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Resolved relative to the installed script directory.
+# shellcheck disable=SC1091
+. "$script_dir/restic-password-file.sh"
 
 [ "$(id -u)" -eq 0 ] || { printf '%s\n' 'This backup must run as root.' >&2; exit 1; }
 compose_file="${AVELREN_COMPOSE_FILE:-/opt/avelren/docker-compose.yml}"
@@ -18,7 +22,7 @@ if [ ! -f "$env_file" ] || [ ! -f "$password_file" ] || [ ! -f "$rclone_config" 
   printf '%s\n' 'Backup configuration is incomplete.' >&2
   exit 1
 fi
-[ "$(stat -c '%u:%a' "$password_file")" = '0:600' ] || { printf '%s\n' 'Restic password file must be root:root mode 0600.' >&2; exit 1; }
+validate_restic_password_file "$password_file" || exit 1
 [ "$(stat -c '%u:%a' "$rclone_config")" = '0:600' ] || { printf '%s\n' 'rclone config must be root:root mode 0600.' >&2; exit 1; }
 install -d -o root -g root -m 700 "$tmp_root" "$(dirname "$lock_file")"
 exec 9>"$lock_file"
