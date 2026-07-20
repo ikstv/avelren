@@ -21,10 +21,10 @@ flowchart TD
 | Компонент | Поточний стан |
 |---|---|
 | `GET /v1/health` | Реалізовано й протестовано |
-| `GET /v1/workload` | Реалізовано з in-memory demo provider |
+| `GET /v1/workload` | Реалізовано з API client with loading/error/retry |
 | `PollingCoordinator` | Ін’єктований `SourceClient`, single-flight, мінімум `60_000 ms` |
 | `ThresholdPolicy` | Базова точка та всі перетнуті пороги з кроком 50 |
-| Android | Compose placeholder, demo repository, модель контракту API |
+| Android | API client for `GET /v1/workload` with loading, errors and retry support |
 | Production adapter | Не реалізовано; реальної адреси або селекторів у Git немає |
 | Push-доставка | Не реалізовано |
 
@@ -81,10 +81,10 @@ An Android request never starts a synchronous source request. The API serves onl
 | Component | Current state |
 |---|---|
 | `GET /v1/health` | Implemented and tested |
-| `GET /v1/workload` | Implemented with an in-memory demo provider |
+| `GET /v1/workload` | Implemented with an API client with loading/error/retry |
 | `PollingCoordinator` | Injected `SourceClient`, single-flight, minimum `60,000 ms` |
 | `ThresholdPolicy` | Baseline plus every crossed threshold in steps of 50 |
-| Android | Compose placeholder, demo repository, API contract model |
+| Android | API client for `GET /v1/workload` with loading, errors and retry support |
 | Production adapter | Not implemented; Git contains no real address or selectors |
 | Push delivery | Not implemented |
 
