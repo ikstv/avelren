@@ -37,11 +37,16 @@ configure_restic_repository() {
       ;;
   esac
 
+  # Outputs are consumed by scripts that source this helper.
+  # shellcheck disable=SC2034
   RESTIC_REPOSITORY_URL="$repository"
+  # shellcheck disable=SC2034
   RCLONE_REPOSITORY_PATH="$rclone_path"
   RCLONE_REMOTE_ROOT="${remote}:"
   case "$path" in
+    # shellcheck disable=SC2034
     */*) RCLONE_REPOSITORY_PARENT="${remote}:${path%/*}" ;;
+    # shellcheck disable=SC2034
     *) RCLONE_REPOSITORY_PARENT="$RCLONE_REMOTE_ROOT" ;;
   esac
 }
