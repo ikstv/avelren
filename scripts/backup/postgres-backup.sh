@@ -4,6 +4,9 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # Resolved relative to the installed script directory.
 # shellcheck disable=SC1091
 . "$script_dir/restic-password-file.sh"
+# Resolved relative to the installed script directory.
+# shellcheck disable=SC1091
+. "$script_dir/restic-repository.sh"
 
 [ "$(id -u)" -eq 0 ] || { printf '%s\n' 'This backup must run as root.' >&2; exit 1; }
 compose_file="${AVELREN_COMPOSE_FILE:-/opt/avelren/docker-compose.yml}"
@@ -17,7 +20,7 @@ pg_database="${AVELREN_PG_DATABASE:-avelren}"
 pg_user="${AVELREN_PG_USER:-avelren}"
 compose=(docker compose --env-file "$env_file" --file "$compose_file")
 repo="rclone:${remote}:Avelren Backups/restic"
-case "$remote" in (''|*[!A-Za-z0-9_-]*) printf '%s\n' 'Invalid rclone remote name.' >&2; exit 1;; esac
+configure_restic_repository "$repo" || exit 1
 if [ ! -f "$env_file" ] || [ ! -f "$password_file" ] || [ ! -f "$rclone_config" ]; then
   printf '%s\n' 'Backup configuration is incomplete.' >&2
   exit 1
@@ -30,12 +33,12 @@ flock -n 9 || { printf '%s\n' 'Another PostgreSQL backup is running.' >&2; exit 
 container="$("${compose[@]}" ps -q postgres)"
 [ -n "$container" ] || { printf '%s\n' 'PostgreSQL container is unavailable.' >&2; exit 1; }
 [ "$(docker inspect -f '{{.State.Health.Status}}' "$container")" = healthy ] || { printf '%s\n' 'PostgreSQL is not healthy.' >&2; exit 1; }
-repo_bytes() { RCLONE_CONFIG="$rclone_config" rclone size --json "$repo" | sed -n 's/.*"bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p'; }
+repo_bytes() { RCLONE_CONFIG="$rclone_config" rclone size --json "$RCLONE_REPOSITORY_PATH" | sed -n 's/.*"bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p'; }
 bytes="$(repo_bytes)"
 case "$bytes" in (''|*[!0-9]*) printf '%s\n' 'Repository size is unavailable.' >&2; exit 1;; esac
 [ "$bytes" -lt $((14 * 1024 * 1024 * 1024)) ] || { printf '%s\n' 'Backup stopped: repository reached the 14 GiB hard limit.' >&2; exit 1; }
 [ "$bytes" -lt $((12 * 1024 * 1024 * 1024)) ] || printf '%s\n' 'Warning: repository reached 12 GiB.' >&2
-RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$repo" restic snapshots --password-file "$password_file" >/dev/null
+RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$RESTIC_REPOSITORY_URL" restic snapshots --password-file "$password_file" >/dev/null
 tmpdir="$(mktemp -d -p "$tmp_root" avelren-pg-backup.XXXXXX)"
 chmod 700 "$tmpdir"
 dump="$tmpdir/avelren-$(date -u +%Y%m%dT%H%M%SZ).dump"
@@ -47,5 +50,5 @@ if ! "${compose[@]}" exec -T postgres pg_dump --username "$pg_user" --dbname "$p
 fi
 [ -s "$dump" ] || { printf '%s\n' 'PostgreSQL dump is empty.' >&2; exit 1; }
 pg_restore --list "$dump" >/dev/null 2>"$tmpdir/pg_restore.stderr" || { printf '%s\n' 'PostgreSQL dump validation failed.' >&2; exit 1; }
-RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$repo" restic backup --password-file "$password_file" --tag postgres "$dump" >/dev/null
+RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$RESTIC_REPOSITORY_URL" restic backup --password-file "$password_file" --tag postgres "$dump" >/dev/null
 printf '%s\n' 'PostgreSQL backup completed.'

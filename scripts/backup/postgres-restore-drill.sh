@@ -4,6 +4,9 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # Resolved relative to the installed script directory.
 # shellcheck disable=SC1091
 . "$script_dir/restic-password-file.sh"
+# Resolved relative to the installed script directory.
+# shellcheck disable=SC1091
+. "$script_dir/restic-repository.sh"
 
 [ "$(id -u)" -eq 0 ] || { printf '%s\n' 'This drill must run as root.' >&2; exit 1; }
 compose_file="${AVELREN_COMPOSE_FILE:-/opt/avelren/docker-compose.yml}"
@@ -17,7 +20,7 @@ pg_user="${AVELREN_PG_USER:-avelren}"
 production_db="${AVELREN_PG_DATABASE:-avelren}"
 compose=(docker compose --env-file "$env_file" --file "$compose_file")
 repo="rclone:${remote}:Avelren Backups/restic"
-case "$remote" in (''|*[!A-Za-z0-9_-]*) exit 1;; esac
+configure_restic_repository "$repo" || exit 1
 [ "$production_db" = avelren ] || { printf '%s\n' 'Production database name must remain avelren.' >&2; exit 1; }
 validate_restic_password_file "$password_file" || exit 1
 install -d -o root -g root -m 700 "$tmp_root" "$(dirname "$lock_file")"
@@ -41,7 +44,7 @@ cleanup() {
 }
 trap cleanup EXIT
 printf '%s\n' 'Restore drill started; secrets and payloads omitted.' >"$log_file"
-RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$repo" restic restore latest --password-file "$password_file" --target "$restore_dir" >/dev/null
+RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$RESTIC_REPOSITORY_URL" restic restore latest --password-file "$password_file" --target "$restore_dir" >/dev/null
 dump="$(find "$restore_dir" -type f -name '*.dump' -print -quit)"
 [ -n "$dump" ] || { printf '%s\n' 'No custom-format dump found.' >>"$log_file"; exit 1; }
 "${compose[@]}" exec -T postgres createdb --username "$pg_user" "$tmpdb" >/dev/null
