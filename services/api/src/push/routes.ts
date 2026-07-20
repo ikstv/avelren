@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { DeviceAuthenticationError, parseHeartbeatInput, parseInstallationId,
   parseRegistrationInput, parseTokenInput, type PostgresDeviceRegistrationService } from "./device-registration.js";
 import { PayloadValidationError } from "./exact-object.js";
+import { AppAttestationError, type AppAttestationVerifier } from "../security/app-attestation.js";
 
 export interface RegistrationService {
   register(input: ReturnType<typeof parseRegistrationInput>): Promise<Readonly<{
@@ -40,9 +41,22 @@ const credentialFrom = (request: FastifyRequest): string => {
 };
 
 export function registerPushRoutes(app: FastifyInstance, service: RegistrationService,
+  appAttestation: AppAttestationVerifier,
   limiter = new RegistrationRateLimiter()): void {
   const limited = (request: FastifyRequest): boolean => limiter.allow(request.ip);
+  const attest = async (request: FastifyRequest): Promise<void> => {
+    const token = request.headers["x-firebase-appcheck"];
+    if (typeof token !== "string" || token.length > 8_192) {
+      throw new AppAttestationError("invalid");
+    }
+    await appAttestation.verify(token);
+  };
   const handleError = (error: unknown, reply: { code(status: number): unknown }): never => {
+    if (error instanceof AppAttestationError) {
+      throw Object.assign(new Error("Application attestation failed"), {
+        statusCode: error.kind === "unavailable" ? 503 : 401,
+      });
+    }
     if (error instanceof PayloadValidationError) {
       throw Object.assign(new Error("Invalid request"), { statusCode: 400 });
     }
@@ -55,6 +69,7 @@ export function registerPushRoutes(app: FastifyInstance, service: RegistrationSe
   app.post("/v1/push/installations", async (request, reply) => {
     if (!limited(request)) return reply.code(429).send({ error: { code: "rate_limited", message: "Try later" } });
     try {
+      await attest(request);
       const result = await service.register(parseRegistrationInput(request.body));
       return reply.code(result.installationCredential ? 201 : 200).send(result);
     } catch (error) { return handleError(error, reply); }
@@ -63,6 +78,7 @@ export function registerPushRoutes(app: FastifyInstance, service: RegistrationSe
     async (request, reply) => {
       if (!limited(request)) return reply.code(429).send({ error: { code: "rate_limited", message: "Try later" } });
       try {
+        await attest(request);
         const id = parseInstallationId(request.params.installationId);
         const input = parseTokenInput(request.body);
         await service.rotateToken(id, credentialFrom(request), input.token);
@@ -73,6 +89,7 @@ export function registerPushRoutes(app: FastifyInstance, service: RegistrationSe
     async (request, reply) => {
       if (!limited(request)) return reply.code(429).send({ error: { code: "rate_limited", message: "Try later" } });
       try {
+        await attest(request);
         const id = parseInstallationId(request.params.installationId);
         const input = parseHeartbeatInput(request.body);
         await service.heartbeat(id, credentialFrom(request), input.locale);
@@ -83,6 +100,7 @@ export function registerPushRoutes(app: FastifyInstance, service: RegistrationSe
     async (request, reply) => {
       if (!limited(request)) return reply.code(429).send({ error: { code: "rate_limited", message: "Try later" } });
       try {
+        await attest(request);
         await service.disable(parseInstallationId(request.params.installationId), credentialFrom(request));
         return reply.code(204).send();
       } catch (error) { return handleError(error, reply); }

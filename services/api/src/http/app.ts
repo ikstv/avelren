@@ -8,11 +8,13 @@ import {
   WORKLOAD_FRESHNESS_VALUES,
   type WorkloadProvider,
 } from "../workload/workload.js";
+import type { AppAttestationVerifier } from "../security/app-attestation.js";
 
 export interface BuildAppOptions {
   workloadProvider?: WorkloadProvider;
   logger?: boolean;
   pushRegistrationService?: RegistrationService;
+  appAttestationVerifier?: AppAttestationVerifier;
 }
 
 const healthResponseSchema = {
@@ -105,7 +107,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   );
 
   if (options.pushRegistrationService) {
-    registerPushRoutes(app, options.pushRegistrationService);
+    if (!options.appAttestationVerifier) {
+      throw new Error("Push routes require application attestation");
+    }
+    registerPushRoutes(app, options.pushRegistrationService, options.appAttestationVerifier);
   }
 
   return app;

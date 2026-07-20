@@ -5,7 +5,6 @@ import ua.ikstv.avelren.BuildConfig
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URI
-import java.net.URL
 import java.util.Locale
 import javax.net.ssl.HttpsURLConnection
 
@@ -18,15 +17,16 @@ interface PushRegistrationApi {
     suspend fun disable(installationId: String, credential: String)
 }
 
+interface PushRegistrationTransport {
+    fun execute(method: String, relativePath: String, body: String?, credential: String?,
+        appCheckToken: String, accepted: Set<Int>): String
+}
+
 class PushRegistrationClient(
-    private val baseUrl: String = BuildConfig.API_BASE_URL,
+    private val attestation: AppAttestationTokenProvider = FirebaseAppAttestationTokenProvider(),
+    private val transport: PushRegistrationTransport = HttpsPushRegistrationTransport(BuildConfig.API_BASE_URL),
     private val gson: Gson = Gson(),
 ) : PushRegistrationApi {
-    init {
-        val uri = URI(baseUrl)
-        require(uri.scheme == "https" && uri.userInfo == null && uri.fragment == null)
-    }
-
     override suspend fun register(installationId: String, token: String, locale: String): RegistrationResult {
         val response = request(
             "POST", "v1/push/installations",
@@ -34,7 +34,7 @@ class PushRegistrationClient(
                 "platform" to "android", "locale" to locale)), null, setOf(200, 201),
         )
         val decoded = gson.fromJson(response, RegistrationResponse::class.java)
-        if (decoded.status != "registered") throw PushRegistrationException()
+        if (decoded.status != "registered") throw PushRegistrationException(retryable = false)
         return RegistrationResult(decoded.installationCredential)
     }
 
@@ -55,30 +55,70 @@ class PushRegistrationClient(
     private fun path(id: String, suffix: String? = null): String =
         "v1/push/installations/$id" + (suffix?.let { "/$it" } ?: "")
 
-    private fun request(method: String, relativePath: String, body: String?, credential: String?,
+    private suspend fun request(method: String, relativePath: String, body: String?, credential: String?,
         accepted: Set<Int>): String {
-        val connection = URL(URL(baseUrl), relativePath).openConnection() as? HttpsURLConnection
-            ?: throw PushRegistrationException()
+        val appCheckToken = try {
+            attestation.token()
+        } catch (error: PushRegistrationException) {
+            throw error
+        } catch (_: Exception) {
+            throw PushRegistrationException(retryable = true)
+        }
+        if (!APP_CHECK_TOKEN.matches(appCheckToken)) throw PushRegistrationException(retryable = false)
+        return transport.execute(method, relativePath, body, credential, appCheckToken, accepted)
+    }
+
+    private data class RegistrationResponse(
+        val status: String? = null, val installationCredential: String? = null,
+    )
+
+    private companion object {
+        val APP_CHECK_TOKEN = Regex("^[A-Za-z0-9._-]{20,8192}$")
+    }
+}
+
+internal class HttpsPushRegistrationTransport(baseUrl: String) : PushRegistrationTransport {
+    private val approvedBase = URI(baseUrl)
+
+    init {
+        require(approvedBase.scheme == "https" && !approvedBase.host.isNullOrBlank() &&
+            approvedBase.userInfo == null && approvedBase.query == null && approvedBase.fragment == null &&
+            approvedBase.path.endsWith("/"))
+    }
+
+    override fun execute(method: String, relativePath: String, body: String?, credential: String?,
+        appCheckToken: String, accepted: Set<Int>): String {
+        val target = approvedBase.resolve(relativePath)
+        if (target.scheme != approvedBase.scheme || target.host != approvedBase.host ||
+            target.port != approvedBase.port || target.userInfo != null) {
+            throw PushRegistrationException(retryable = false)
+        }
+        val connection = target.toURL().openConnection() as? HttpsURLConnection
+            ?: throw PushRegistrationException(retryable = false)
         try {
             connection.requestMethod = method
             connection.instanceFollowRedirects = false
             connection.connectTimeout = 5_000
             connection.readTimeout = 8_000
             connection.setRequestProperty("Accept", "application/json")
+            connection.setRequestProperty("X-Firebase-AppCheck", appCheckToken)
             if (credential != null) connection.setRequestProperty("Authorization", "Bearer $credential")
             if (body != null) {
                 val bytes = body.toByteArray(Charsets.UTF_8)
-                if (bytes.size > REQUEST_LIMIT) throw PushRegistrationException()
+                if (bytes.size > REQUEST_LIMIT) throw PushRegistrationException(retryable = false)
                 connection.doOutput = true
                 connection.setFixedLengthStreamingMode(bytes.size)
                 connection.setRequestProperty("Content-Type", "application/json")
                 connection.outputStream.use { it.write(bytes) }
             }
             val status = connection.responseCode
-            if (status in 300..399 || status !in accepted) throw PushRegistrationException()
+            if (status in 300..399) throw PushRegistrationException(retryable = false)
+            if (status !in accepted) {
+                throw PushRegistrationException(retryable = status == 408 || status == 429 || status >= 500)
+            }
             if (status == HttpURLConnection.HTTP_NO_CONTENT) return ""
             if (connection.contentType?.lowercase(Locale.ROOT)?.startsWith("application/json") != true) {
-                throw PushRegistrationException()
+                throw PushRegistrationException(retryable = false)
             }
             return connection.inputStream.use { input ->
                 val output = ByteArrayOutputStream()
@@ -86,7 +126,9 @@ class PushRegistrationClient(
                 while (true) {
                     val read = input.read(buffer)
                     if (read < 0) break
-                    if (output.size() + read > RESPONSE_LIMIT) throw PushRegistrationException()
+                    if (output.size() + read > RESPONSE_LIMIT) {
+                        throw PushRegistrationException(retryable = false)
+                    }
                     output.write(buffer, 0, read)
                 }
                 output.toString(Charsets.UTF_8.name())
@@ -94,19 +136,16 @@ class PushRegistrationClient(
         } catch (error: PushRegistrationException) {
             throw error
         } catch (_: Exception) {
-            throw PushRegistrationException()
+            throw PushRegistrationException(retryable = true)
         } finally {
             connection.disconnect()
         }
     }
 
-    private data class RegistrationResponse(
-        val status: String? = null, val installationCredential: String? = null,
-    )
     private companion object {
         const val REQUEST_LIMIT = 8 * 1_024
         const val RESPONSE_LIMIT = 16 * 1_024
     }
 }
 
-class PushRegistrationException : Exception("Push registration failed")
+class PushRegistrationException(val retryable: Boolean = true) : Exception("Push registration failed")
