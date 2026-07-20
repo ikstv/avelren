@@ -39,7 +39,7 @@ integration("PostgreSQL notification outbox", () => {
   it("creates one deduplicated outbox row in the threshold event transaction", async () => {
     await pool.query(
       `INSERT INTO threshold_events (
-         event_id, location_id, threshold, previous_value, current_value, observed_at, created_at, status
+         event_id, location_id, threshold_value, previous_value, current_value, observed_at, created_at, status
        ) VALUES ($1, $2, 50, 49, 50, clock_timestamp(), clock_timestamp(), 'pending')
        ON CONFLICT (event_id) DO NOTHING`, [eventId, locationId],
     );
