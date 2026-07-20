@@ -14,7 +14,10 @@ pg_user="${AVELREN_PG_USER:-avelren}"
 compose=(docker compose --env-file "$env_file" --file "$compose_file")
 repo="rclone:${remote}:Avelren Backups/restic"
 case "$remote" in (''|*[!A-Za-z0-9_-]*) printf '%s\n' 'Invalid rclone remote name.' >&2; exit 1;; esac
-[ -f "$env_file" ] && [ -f "$password_file" ] && [ -f "$rclone_config" ] || { printf '%s\n' 'Backup configuration is incomplete.' >&2; exit 1; }
+if [ ! -f "$env_file" ] || [ ! -f "$password_file" ] || [ ! -f "$rclone_config" ]; then
+  printf '%s\n' 'Backup configuration is incomplete.' >&2
+  exit 1
+fi
 [ "$(stat -c '%u:%a' "$password_file")" = '0:600' ] || { printf '%s\n' 'Restic password file must be root:root mode 0600.' >&2; exit 1; }
 [ "$(stat -c '%u:%a' "$rclone_config")" = '0:600' ] || { printf '%s\n' 'rclone config must be root:root mode 0600.' >&2; exit 1; }
 install -d -o root -g root -m 700 "$tmp_root" "$(dirname "$lock_file")"
