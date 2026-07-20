@@ -214,5 +214,8 @@ jobs:
       - name: Перевірити production Compose / Validate production Compose
         run: docker compose --env-file .env.production.example config --quiet
 
+      - name: Перевірити file capability Caddy / Test Caddy file capability
+        run: ./scripts/ci/caddy-file-capability.sh
+
       - name: Перевірити чисту ініціалізацію / Test clean initialization
         run: ./scripts/ci/production-compose-smoke.sh
