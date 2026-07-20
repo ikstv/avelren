@@ -61,6 +61,12 @@ export {
   PostgresCollectorStore,
 } from "./storage/postgres-collector-store.js";
 export { runMigrations } from "./storage/migrations.js";
+export { parseExternalSourceConfig, type ExternalSourceConfig } from "./external-source/config.js";
+export { ExternalSourceAdapter, type ExternalSourceCacheMetadata, type ExternalSourceClient, type ExternalSourcePollResult, type ExternalSourceResponse, type ObservationParser } from "./external-source/external-source-adapter.js";
+export { HtmlObservationParser } from "./external-source/html-observation-parser.js";
+export { ExternalSourceHttpError, NodeAddressResolver, NodeHttpsTransport, SecureExternalSourceClient, isPublicAddress } from "./external-source/secure-http-client.js";
+export { PostgresExternalSourcePollStateStore, type ExternalSourcePollStateStore, type PollFailurePolicy, type PollReservation, type PollReservationRequest } from "./external-source/postgres-poll-state-store.js";
+export { CoordinatedExternalSourceClient } from "./external-source/coordinated-source-client.js";
 export { parsePushConfig, type PushConfig } from "./push/config.js";
 export {
   generateInstallationCredential,

@@ -25,7 +25,7 @@ flowchart TD
 | `PollingCoordinator` | Ін’єктований `SourceClient`, single-flight, мінімум `60_000 ms` |
 | `ThresholdPolicy` | Базова точка та всі перетнуті пороги з кроком 50 |
 | Android | API client for `GET /v1/workload` with loading, errors and retry support |
-| Production adapter | Не реалізовано; реальної адреси або селекторів у Git немає |
+| Server adapter | Реалізовано fail-closed основу; реальної адреси або селекторів у Git немає |
 | Push-доставка | Не реалізовано |
 
 ### Інваріант опитування
@@ -85,7 +85,7 @@ An Android request never starts a synchronous source request. The API serves onl
 | `PollingCoordinator` | Injected `SourceClient`, single-flight, minimum `60,000 ms` |
 | `ThresholdPolicy` | Baseline plus every crossed threshold in steps of 50 |
 | Android | API client for `GET /v1/workload` with loading, errors and retry support |
-| Production adapter | Not implemented; Git contains no real address or selectors |
+| Server adapter | Fail-closed foundation implemented; Git contains no real address or selectors |
 | Push delivery | Not implemented |
 
 ### Polling invariant

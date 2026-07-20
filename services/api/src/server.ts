@@ -16,16 +16,29 @@ import { TokenCrypto } from "./push/token-crypto.js";
 import { NotificationWorker } from "./push/worker.js";
 import { createAppAttestationVerifier, parseAppAttestationConfig,
   type AppAttestationVerifier } from "./security/app-attestation.js";
+import { CollectorService } from "./collector/collector-service.js";
+import { CoordinatedExternalSourceClient } from "./external-source/coordinated-source-client.js";
+import { parseExternalSourceConfig } from "./external-source/config.js";
+import { ExternalSourceAdapter } from "./external-source/external-source-adapter.js";
+import { HtmlObservationParser } from "./external-source/html-observation-parser.js";
+import { PostgresExternalSourcePollStateStore } from "./external-source/postgres-poll-state-store.js";
+import { SecureExternalSourceClient } from "./external-source/secure-http-client.js";
+import { PostgresCycleLease, PostgresLeaseStore } from "./lease/postgres-lease-store.js";
+import { PollingCoordinator } from "./polling/polling-coordinator.js";
 
 const demoMode = parseDemoMode(process.env.AVELREN_DEMO_MODE);
 const storageConfig = parseStorageConfig(process.env);
 const pushConfig = parsePushConfig(process.env);
 const appAttestationConfig = parseAppAttestationConfig(process.env, pushConfig.enabled);
+const externalSourceConfig = parseExternalSourceConfig(process.env);
 if (demoMode && storageConfig.mode === "postgres") {
   throw new Error("AVELREN_DEMO_MODE cannot be used with PostgreSQL storage");
 }
 if (pushConfig.enabled && storageConfig.mode !== "postgres") {
   throw new Error("Push requires PostgreSQL storage");
+}
+if (externalSourceConfig.enabled && storageConfig.mode !== "postgres") {
+  throw new Error("External source collection requires PostgreSQL storage");
 }
 
 let pool: Pool | undefined;
@@ -33,6 +46,7 @@ let workloadProvider: WorkloadProvider;
 let pushRegistrationService: PostgresDeviceRegistrationService | undefined;
 let notificationWorker: NotificationWorker | undefined;
 let appAttestationVerifier: AppAttestationVerifier | undefined;
+let collectorCoordinator: PollingCoordinator<void> | undefined;
 if (pushConfig.enabled) {
   appAttestationVerifier = createAppAttestationVerifier(appAttestationConfig);
 }
@@ -44,9 +58,56 @@ if (storageConfig.mode === "postgres") {
     await pool.end();
     throw error;
   }
-  workloadProvider = new SnapshotWorkloadProvider({
-    snapshotStore: new PostgresCollectorStore(pool),
-  });
+  const collectorStore = new PostgresCollectorStore(pool);
+  workloadProvider = new SnapshotWorkloadProvider({ snapshotStore: collectorStore });
+  if (externalSourceConfig.enabled) {
+    const sourceOwner = process.env.AVELREN_INSTANCE_ID ?? randomUUID();
+    const sourceClient = new SecureExternalSourceClient({
+      url: requiredExternal(externalSourceConfig.url),
+      allowedHost: requiredExternal(externalSourceConfig.allowedHost),
+      timeoutMs: externalSourceConfig.timeoutMs,
+      maxResponseBytes: externalSourceConfig.maxResponseBytes,
+      maxHeaderBytes: externalSourceConfig.maxHeaderBytes,
+      maxRetryAfterMs: externalSourceConfig.maxRetryAfterMs,
+    });
+    const parser = new HtmlObservationParser({
+      locationId: requiredExternal(externalSourceConfig.locationId),
+      countSelector: requiredExternal(externalSourceConfig.countSelector),
+      ...(externalSourceConfig.observedAtSelector === undefined ? {} : {
+        observedAtSelector: externalSourceConfig.observedAtSelector,
+      }),
+    });
+    const pollingClient = new CoordinatedExternalSourceClient(
+      new ExternalSourceAdapter(sourceClient, parser),
+      new CollectorService({ snapshotStore: collectorStore, thresholdEventStore: collectorStore, transactionStore: collectorStore }),
+      new PostgresExternalSourcePollStateStore(pool),
+      {
+        reservation: {
+          sourceKey: "primary", ownerId: sourceOwner,
+          minimumIntervalMs: externalSourceConfig.pollIntervalMs,
+          claimTtlMs: externalSourceConfig.claimTtlMs,
+        },
+        failurePolicy: {
+          minimumIntervalMs: externalSourceConfig.pollIntervalMs,
+          backoffBaseMs: externalSourceConfig.backoffBaseMs,
+          backoffMaxMs: externalSourceConfig.backoffMaxMs,
+          circuitFailures: externalSourceConfig.circuitFailures,
+          circuitOpenMs: externalSourceConfig.circuitOpenMs,
+        },
+      },
+    );
+    collectorCoordinator = new PollingCoordinator({
+      sourceClient: pollingClient,
+      intervalMs: externalSourceConfig.pollIntervalMs,
+      onValue: () => undefined,
+      onError: () => undefined,
+      cycleLease: new PostgresCycleLease({
+        store: new PostgresLeaseStore(pool),
+        leaseKey: "collector:external-source", ownerId: sourceOwner,
+        ttlMs: parseLeaseTtlMs(process.env.COLLECTOR_LEASE_TTL_SECONDS),
+      }),
+    });
+  }
   if (pushConfig.enabled) {
     if (!pushConfig.keyring || !pushConfig.projectId) {
       throw new Error("Push configuration is incomplete");
@@ -101,6 +162,7 @@ if (pool !== undefined) {
   const databasePool = pool;
   app.addHook("onClose", async () => {
     if (workerTimer) clearInterval(workerTimer);
+    await collectorCoordinator?.stop();
     await notificationWorker?.stop();
     await databasePool.end();
   });
@@ -109,6 +171,7 @@ const port = parsePort(process.env.PORT);
 const host = process.env.HOST ?? "0.0.0.0";
 
 await app.listen({ host, port });
+collectorCoordinator?.start();
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
@@ -130,4 +193,17 @@ function parsePort(value: string | undefined): number {
   }
 
   return port;
+}
+
+function parseLeaseTtlMs(value: string | undefined): number {
+  const seconds = value === undefined ? 120 : Number(value);
+  if (!Number.isSafeInteger(seconds) || seconds < 60 || seconds > 86_400) {
+    throw new Error("Collector lease configuration is invalid");
+  }
+  return seconds * 1_000;
+}
+
+function requiredExternal<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("External source configuration is invalid");
+  return value;
 }
