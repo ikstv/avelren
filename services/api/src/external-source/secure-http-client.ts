@@ -41,14 +41,21 @@ export class SecureExternalSourceClient implements ExternalSourceClient {
   public async fetch(cache: ExternalSourceCacheMetadata, signal: AbortSignal): Promise<ExternalSourceResponse> {
     if (this.options.url.hostname.toLowerCase() !== this.options.allowedHost.toLowerCase()) throw httpError("network");
     let addresses: readonly ResolvedAddress[];
-    try { addresses = await this.resolver.resolve(this.options.allowedHost); }
+    try {
+      addresses = await resolveWithDeadline(
+        this.resolver,
+        this.options.allowedHost,
+        signal,
+        this.options.timeoutMs,
+      );
+    }
     catch { throw httpError("network"); }
     if (addresses.length === 0 || addresses.some((entry) => !isPublicAddress(entry.address))) throw httpError("network");
     const selected = [...addresses].sort((a, b) => a.family - b.family || a.address.localeCompare(b.address))[0];
     if (selected === undefined) throw httpError("network");
     const headers: Record<string, string> = { accept: "text/html", "accept-encoding": "identity", "user-agent": "Avelren-collector/1" };
-    if (cache.etag !== undefined) headers["if-none-match"] = cacheHeader(cache.etag);
-    if (cache.lastModified !== undefined) headers["if-modified-since"] = cacheHeader(cache.lastModified);
+    if (cache.etag !== undefined) headers["if-none-match"] = etagHeader(cache.etag);
+    if (cache.lastModified !== undefined) headers["if-modified-since"] = lastModifiedHeader(cache.lastModified);
     let response: RawHttpsResponse;
     try {
       response = await this.transport.request({
@@ -138,9 +145,20 @@ export function isPublicAddress(address: string): boolean {
 }
 
 function httpError(code: ExternalHttpErrorCode): ExternalSourceHttpError { return new ExternalSourceHttpError(code); }
-function cacheHeader(value: string): string {
+function boundedHeader(value: string): string {
   if (Buffer.byteLength(value) > 512 || !/^[\x20-\x7e]+$/u.test(value)) throw httpError("metadata");
   return value;
+}
+function etagHeader(value: string): string {
+  const bounded = boundedHeader(value);
+  if (!/^(?:W\/)?"[\x21\x23-\x7e]*"$/u.test(bounded)) throw httpError("metadata");
+  return bounded;
+}
+function lastModifiedHeader(value: string): string {
+  const bounded = boundedHeader(value);
+  const milliseconds = Date.parse(bounded);
+  if (!Number.isFinite(milliseconds) || new Date(milliseconds).toUTCString() !== bounded) throw httpError("metadata");
+  return bounded;
 }
 function single(value: string | string[] | undefined): string | undefined {
   if (value === undefined) return undefined;
@@ -149,7 +167,7 @@ function single(value: string | string[] | undefined): string | undefined {
 }
 function readMetadata(headers: IncomingHttpHeaders): ExternalSourceCacheMetadata {
   const etag = single(headers.etag); const lastModified = single(headers["last-modified"]);
-  return { ...(etag === undefined ? {} : { etag: cacheHeader(etag) }), ...(lastModified === undefined ? {} : { lastModified: cacheHeader(lastModified) }) };
+  return { ...(etag === undefined ? {} : { etag: etagHeader(etag) }), ...(lastModified === undefined ? {} : { lastModified: lastModifiedHeader(lastModified) }) };
 }
 function contentType(value: string | string[] | undefined): void {
   const header = single(value);
@@ -164,4 +182,34 @@ function retryAfter(value: string | string[] | undefined, maximumMs: number): nu
   if (header === undefined || !/^(0|[1-9][0-9]{0,8})$/u.test(header)) return undefined;
   const milliseconds = Number(header) * 1_000;
   return Number.isSafeInteger(milliseconds) ? Math.min(milliseconds, maximumMs) : undefined;
+}
+
+function resolveWithDeadline(
+  resolver: AddressResolver,
+  hostname: string,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<readonly ResolvedAddress[]> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      action();
+    };
+    const onAbort = (): void => finish(() => reject(httpError("network")));
+    const timer = setTimeout(() => finish(() => reject(httpError("network"))), timeoutMs);
+    timer.unref();
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    resolver.resolve(hostname).then(
+      (addresses) => finish(() => resolve(addresses)),
+      () => finish(() => reject(httpError("network"))),
+    );
+  });
 }

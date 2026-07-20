@@ -14,6 +14,12 @@ describe("secure external HTTPS client", () => {
     await expect(client(transport, resolver).fetch({}, new AbortController().signal)).rejects.toMatchObject({ code: "network" });
     expect(transport.request).not.toHaveBeenCalled();
   });
+  it("bounds DNS resolution time without starting HTTP", async () => {
+    const transport = fakeTransport(ok());
+    const resolver = { resolve: vi.fn(() => new Promise<never>(() => undefined)) } as AddressResolver;
+    await expect(client(transport, resolver, 1).fetch({}, new AbortController().signal)).rejects.toMatchObject({ code: "network" });
+    expect(transport.request).not.toHaveBeenCalled();
+  });
   it("pins a validated address and uses minimal headers", async () => {
     const transport = fakeTransport(ok());
     await client(transport).fetch({ etag: '"safe"' }, new AbortController().signal);
@@ -49,10 +55,16 @@ describe("secure external HTTPS client", () => {
     await expect(client(fakeTransport({ statusCode: 429, headers: { "retry-after": "999999" }, body: Buffer.alloc(0) })).fetch({}, new AbortController().signal)).rejects.toMatchObject({ code: "rate-limited", retryAfterMs: 120_000 });
     await expect(client(fakeTransport(ok())).fetch({ etag: '"safe"\r\nCookie: unsafe' }, new AbortController().signal)).rejects.toBeInstanceOf(ExternalSourceHttpError);
   });
+  it.each([
+    { etag: "not-quoted" },
+    { lastModified: "not-an-http-date" },
+  ])("rejects malformed cache validators", async (cache) => {
+    await expect(client(fakeTransport(ok())).fetch(cache, new AbortController().signal)).rejects.toMatchObject({ code: "metadata" });
+  });
 });
 
-function client(transport: ExternalHttpTransport, resolver: AddressResolver = { resolve: vi.fn().mockResolvedValue([{ address: "8.8.8.8", family: 4 }]) }): SecureExternalSourceClient {
-  return new SecureExternalSourceClient({ url: new URL("https://source.example.invalid/data"), allowedHost: "source.example.invalid", timeoutMs: 1000, maxResponseBytes: 1024, maxHeaderBytes: 1024, maxRetryAfterMs: 120_000, resolver, transport, clock: () => new Date("2026-07-20T08:00:00.000Z") });
+function client(transport: ExternalHttpTransport, resolver: AddressResolver = { resolve: vi.fn().mockResolvedValue([{ address: "8.8.8.8", family: 4 }]) }, timeoutMs = 1000): SecureExternalSourceClient {
+  return new SecureExternalSourceClient({ url: new URL("https://source.example.invalid/data"), allowedHost: "source.example.invalid", timeoutMs, maxResponseBytes: 1024, maxHeaderBytes: 1024, maxRetryAfterMs: 120_000, resolver, transport, clock: () => new Date("2026-07-20T08:00:00.000Z") });
 }
 function fakeTransport(response: RawHttpsResponse): ExternalHttpTransport { return { request: vi.fn().mockResolvedValue(response) }; }
 function ok(): RawHttpsResponse { return { statusCode: 200, headers: { "content-type": "text/html; charset=utf-8" }, body: Buffer.from("<html></html>") }; }
