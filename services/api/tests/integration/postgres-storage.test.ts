@@ -28,7 +28,7 @@ describePostgres("PostgreSQL durable collector storage", () => {
       const result = await pool.query(
         "SELECT version FROM avelren_schema_migrations ORDER BY version",
       );
-      expect(result.rows).toEqual([{ version: "001" }]);
+      expect(result.rows).toEqual([{ version: "001" }, { version: "002" }]);
     } finally {
       await secondPool.end();
     }
@@ -235,7 +235,7 @@ async function resetTestDatabase(pool: Pool): Promise<void> {
 
 async function truncateCollectorData(pool: Pool): Promise<void> {
   await pool.query(
-    `TRUNCATE TABLE threshold_events, collector_snapshots,
-                    collector_observations, collector_leases`,
+    `TRUNCATE TABLE notification_outbox, push_devices, threshold_events,
+                    collector_snapshots, collector_observations, collector_leases`,
   );
 }

@@ -62,7 +62,7 @@ BEGIN
       'schemaVersion', '1',
       'eventId', NEW.event_id,
       'locationId', NEW.location_id,
-      'threshold', NEW.threshold,
+      'threshold', NEW.threshold_value,
       'observedCount', NEW.current_value,
       'observedAt', to_char(NEW.observed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     )
