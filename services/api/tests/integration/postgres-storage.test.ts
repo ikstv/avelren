@@ -5,6 +5,7 @@ import { CollectorService } from "../../src/collector/collector-service.js";
 import { PostgresLeaseStore } from "../../src/lease/postgres-lease-store.js";
 import { runMigrations } from "../../src/storage/migrations.js";
 import { PostgresCollectorStore } from "../../src/storage/postgres-collector-store.js";
+import { PostgresExternalSourcePollStateStore } from "../../src/external-source/postgres-poll-state-store.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const testDatabaseUrl =
@@ -28,7 +29,7 @@ describePostgres("PostgreSQL durable collector storage", () => {
       const result = await pool.query(
         "SELECT version FROM avelren_schema_migrations ORDER BY version",
       );
-      expect(result.rows).toEqual([{ version: "001" }, { version: "002" }]);
+      expect(result.rows).toEqual([{ version: "001" }, { version: "002" }, { version: "003" }]);
     } finally {
       await secondPool.end();
     }
@@ -223,11 +224,47 @@ describePostgres("PostgreSQL durable collector storage", () => {
     });
     expect(second?.ownerId).toBe("owner-b");
   });
+
+  it("reserves one external poll across concurrent replicas", async () => {
+    await truncateCollectorData(pool);
+    const sourceKey = `poll-concurrent-${process.pid}`;
+    const first = new PostgresExternalSourcePollStateStore(pool);
+    const second = new PostgresExternalSourcePollStateStore(pool);
+    const [left, right] = await Promise.all([
+      first.tryReserve({ sourceKey, ownerId: "owner-a", minimumIntervalMs: 60_000, claimTtlMs: 60_000 }),
+      second.tryReserve({ sourceKey, ownerId: "owner-b", minimumIntervalMs: 60_000, claimTtlMs: 60_000 }),
+    ]);
+    expect([left, right].filter(Boolean)).toHaveLength(1);
+  });
+
+  it("keeps the durable interval across store instances and enforces ownership", async () => {
+    await truncateCollectorData(pool);
+    const sourceKey = `poll-restart-${process.pid}`;
+    const first = new PostgresExternalSourcePollStateStore(pool);
+    const reservation = await first.tryReserve({ sourceKey, ownerId: "owner-a", minimumIntervalMs: 60_000, claimTtlMs: 60_000 });
+    expect(reservation).not.toBeNull();
+    if (reservation !== null) {
+      expect(await first.recordSuccess({ ...reservation, ownerId: "owner-b" }, {})).toBe(false);
+      expect(await first.recordSuccess(reservation, { etag: "test-etag" })).toBe(true);
+    }
+    expect(await new PostgresExternalSourcePollStateStore(pool).tryReserve({ sourceKey, ownerId: "owner-b", minimumIntervalMs: 60_000, claimTtlMs: 60_000 })).toBeNull();
+  });
+
+  it("recovers a crashed poll only after PostgreSQL deadlines", async () => {
+    await truncateCollectorData(pool);
+    const sourceKey = `poll-crash-${process.pid}`;
+    const store = new PostgresExternalSourcePollStateStore(pool);
+    expect(await store.tryReserve({ sourceKey, ownerId: "owner-a", minimumIntervalMs: 60_000, claimTtlMs: 60_000 })).not.toBeNull();
+    expect(await store.tryReserve({ sourceKey, ownerId: "owner-b", minimumIntervalMs: 60_000, claimTtlMs: 60_000 })).toBeNull();
+    await pool.query(`UPDATE external_source_poll_state SET next_allowed_at = clock_timestamp() - interval '1 second', claim_expires_at = clock_timestamp() - interval '1 second' WHERE source_key = $1`, [sourceKey]);
+    expect(await store.tryReserve({ sourceKey, ownerId: "owner-b", minimumIntervalMs: 60_000, claimTtlMs: 60_000 })).toMatchObject({ ownerId: "owner-b" });
+  });
 });
 
 async function resetTestDatabase(pool: Pool): Promise<void> {
   await pool.query("DROP TABLE IF EXISTS notification_outbox");
   await pool.query("DROP TABLE IF EXISTS push_devices");
+  await pool.query("DROP TABLE IF EXISTS external_source_poll_state");
   await pool.query("DROP TABLE IF EXISTS collector_leases");
   await pool.query("DROP TABLE IF EXISTS threshold_events");
   await pool.query("DROP TABLE IF EXISTS collector_snapshots");
@@ -237,7 +274,7 @@ async function resetTestDatabase(pool: Pool): Promise<void> {
 
 async function truncateCollectorData(pool: Pool): Promise<void> {
   await pool.query(
-    `TRUNCATE TABLE notification_outbox, push_devices, threshold_events,
+    `TRUNCATE TABLE notification_outbox, push_devices, external_source_poll_state, threshold_events,
                     collector_snapshots, collector_observations, collector_leases`,
   );
 }
