@@ -3,8 +3,10 @@ agp = "9.2.1"
 kotlin = "2.3.10"
 androidx-core = "1.19.0"
 androidx-activity = "1.13.0"
-compose-bom = "2026.06.00"
+compose-bom = "2026.06.01"
 junit4 = "4.13.2"
+gson = "2.13.1"
+kotlinx-coroutines = "1.10.2"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidx-core" }
@@ -15,6 +17,8 @@ androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
 junit4 = { module = "junit:junit", version.ref = "junit4" }
+gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

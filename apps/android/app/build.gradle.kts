@@ -1,3 +1,5 @@
+import java.net.URI
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -6,8 +8,11 @@ plugins {
 val configuredApiBaseUrl = providers.gradleProperty("AVELREN_API_BASE_URL")
     .orElse("https://api.avelren.invalid/")
     .get()
-val configuredApiUri = runCatching { java.net.URI(configuredApiBaseUrl) }
-    .getOrElse { throw GradleException("AVELREN_API_BASE_URL must be a valid URI", it) }
+val configuredApiUri: URI = try {
+    URI(configuredApiBaseUrl)
+} catch (cause: Exception) {
+    throw GradleException("AVELREN_API_BASE_URL must be a valid URI", cause)
+}
 
 require(configuredApiUri.scheme == "https") {
     "AVELREN_API_BASE_URL must use HTTPS"
@@ -75,8 +80,10 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.gson)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 
+    testImplementation(libs.kotlinx.coroutines.core)
     testImplementation(libs.junit4)
 }

@@ -2,6 +2,12 @@
 <resources>
     <string name="app_name">Avelren</string>
     <string name="placeholder_title">Avelren</string>
-    <string name="placeholder_loading">Завантаження демонстраційних даних…</string>
-    <string name="placeholder_count">Демонстраційне значення: %1$d</string>
+    <string name="placeholder_loading">Loading data�</string>
+    <string name="state_loading">Loading data�</string>
+    <string name="state_error">Unable to load data</string>
+    <string name="action_retry">Retry</string>
+    <string name="snapshot_location">Location: %1$s</string>
+    <string name="snapshot_vehicle_count">Vehicle count: %1$d</string>
+    <string name="snapshot_freshness">Freshness: %1$s</string>
+    <string name="snapshot_sequence">Sequence: %1$d</string>
 </resources>

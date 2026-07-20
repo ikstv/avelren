@@ -42,7 +42,7 @@ flowchart TD
 - production collector та production deployment;
 - облікові записи користувачів або зберігання персональних даних.
 
-Поточний Android-модуль використовує лише демонстраційний репозиторій. API-клієнт, локальні сповіщення та надійна фонова доставка будуть окремими наступними кроками.
+Андроїд-модуль підключено до API-клієнта Avelren для завантаження поточного навантаження. Локальні сповіщення та надійна фонова доставка залишаються окремими наступними кроками.
 
 ### Структура репозиторію
 
@@ -156,7 +156,7 @@ The first milestone **does not include**:
 - a production collector or production deployment;
 - user accounts or storage of personal data.
 
-The current Android module uses a demo repository only. The API client, local notifications, and reliable background delivery are separate next steps.
+The Android module is now connected to the Avelren API client for workload loading. Local notifications and reliable background delivery remain separate next steps.
 
 ### Repository layout
 
