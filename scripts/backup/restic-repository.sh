@@ -43,10 +43,9 @@ configure_restic_repository() {
   # shellcheck disable=SC2034
   RCLONE_REPOSITORY_PATH="$rclone_path"
   RCLONE_REMOTE_ROOT="${remote}:"
+  # shellcheck disable=SC2034
   case "$path" in
-    # shellcheck disable=SC2034
     */*) RCLONE_REPOSITORY_PARENT="${remote}:${path%/*}" ;;
-    # shellcheck disable=SC2034
     *) RCLONE_REPOSITORY_PARENT="$RCLONE_REMOTE_ROOT" ;;
   esac
 }
