@@ -1,0 +1,18 @@
+[Unit]
+Description=Avelren PostgreSQL encrypted backup
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/avelren/backup/backup.env
+ExecStart=/usr/local/libexec/avelren-postgres-backup
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/avelren-backup /run/lock /var/log
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077

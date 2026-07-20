@@ -1,0 +1,18 @@
+[Unit]
+Description=Weekly Avelren Restic repository check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/avelren/backup/backup.env
+ExecStart=/usr/local/libexec/avelren-postgres-backup-repo-check
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/avelren-backup /run/lock /var/log
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
