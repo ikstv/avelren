@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly Avelren Restic repository check timer
+
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+RandomizedDelaySec=45m
+Persistent=true
+Unit=avelren-postgres-repo-check.service
+
+[Install]
+WantedBy=timers.target

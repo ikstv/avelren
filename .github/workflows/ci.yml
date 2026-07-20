@@ -219,3 +219,33 @@ jobs:
 
       - name: Перевірити чисту ініціалізацію / Test clean initialization
         run: ./scripts/ci/production-compose-smoke.sh
+
+  backup:
+    name: PostgreSQL backup safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+          shellcheck scripts/backup/*.sh scripts/ci/postgres-backup-test.sh
+
+      - name: Backup failure-path and safety tests
+        run: ./scripts/ci/postgres-backup-test.sh
+
+      - name: Secret scan
+        shell: bash
+        run: |
+          if git grep -nI -E 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9_]{20,}|AIza[0-9A-Za-z_-]{35}|AKIA[0-9A-Z]{16}|"private_key"[[:space:]]*:' -- .; then
+            echo 'Secret-like material found'
+            exit 1
+          fi
+
+      - name: Diff check
+        run: git diff --check
