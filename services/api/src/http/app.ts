@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 
 import { InMemoryWorkloadProvider } from "../workload/in-memory-workload-provider.js";
+import { MissingWorkloadSnapshotError } from "../workload/in-memory-workload-provider.js";
 import {
   MAX_VEHICLE_COUNT,
   WORKLOAD_FRESHNESS_VALUES,
@@ -43,9 +44,22 @@ const workloadResponseSchema = {
   },
 } as const;
 
+const workloadUnavailableResponseSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["error", "message", "status", "timestamp"],
+  properties: {
+    error: { type: "string", enum: ["snapshot_unavailable"] },
+    message: { type: "string" },
+    status: { type: "integer", const: 503 },
+    timestamp: { type: "string", format: "date-time" },
+  },
+} as const;
+
 export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   const app = Fastify({ logger: options.logger ?? false });
-  const workloadProvider = options.workloadProvider ?? InMemoryWorkloadProvider.demo();
+  const workloadProvider =
+    options.workloadProvider ?? new InMemoryWorkloadProvider();
 
   app.get(
     "/v1/health",
@@ -64,10 +78,28 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     "/v1/workload",
     {
       schema: {
-        response: { 200: workloadResponseSchema },
+        response: {
+          200: workloadResponseSchema,
+          503: workloadUnavailableResponseSchema,
+        },
       },
     },
-    async () => workloadProvider.getCurrent(),
+    async (_request, reply) => {
+      try {
+        return await workloadProvider.getCurrent();
+      } catch (error) {
+        if (error instanceof MissingWorkloadSnapshotError) {
+          return reply.code(503).send({
+            error: error.code,
+            message: "Workload snapshot is not available yet",
+            status: 503,
+            timestamp: new Date().toISOString(),
+          });
+        }
+
+        throw error;
+      }
+    },
   );
 
   return app;

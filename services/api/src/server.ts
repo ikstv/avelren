@@ -1,6 +1,13 @@
+import { InMemoryWorkloadProvider } from "./workload/in-memory-workload-provider.js";
 import { buildApp } from "./http/app.js";
+import { parseDemoMode } from "./config.js";
 
-const app = buildApp({ logger: true });
+const demoMode = parseDemoMode(process.env.AVELREN_DEMO_MODE);
+const workloadProvider = demoMode
+  ? InMemoryWorkloadProvider.demo()
+  : new InMemoryWorkloadProvider();
+
+const app = buildApp({ logger: true, workloadProvider });
 const port = parsePort(process.env.PORT);
 const host = process.env.HOST ?? "0.0.0.0";
 

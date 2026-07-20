@@ -6,7 +6,10 @@ import {
   validatePollInterval,
   type PollingScheduler,
 } from "../../src/polling/polling-coordinator.js";
+import { createCollectorRuntime } from "../../src/collector/collector-runtime.js";
 import type { SourceClient } from "../../src/polling/source-client.js";
+import { InMemorySnapshotStore } from "../../src/collector/snapshot-store.js";
+import { InMemoryThresholdEventStore } from "../../src/collector/threshold-event-store.js";
 
 class ManualScheduler implements PollingScheduler {
   public readonly delays: number[] = [];
@@ -55,6 +58,19 @@ describe("poll interval validation", () => {
       expect(() => validatePollInterval(intervalMs)).toThrow(RangeError);
     },
   );
+
+  it("rejects collector runtime polling below 60 seconds", () => {
+    expect(() =>
+      createCollectorRuntime({
+        sourceClient: {
+          fetch: vi.fn(),
+        },
+        snapshotStore: new InMemorySnapshotStore(),
+        thresholdEventStore: new InMemoryThresholdEventStore(),
+        intervalMs: MINIMUM_POLL_INTERVAL_MS - 1,
+      }),
+    ).toThrow(RangeError);
+  });
 });
 
 describe("PollingCoordinator", () => {
