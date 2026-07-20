@@ -59,7 +59,112 @@ paths:
               examples:
                 no_snapshot:
                   externalValue: ./examples/workload-unavailable.json
+  /v1/push/installations:
+    post:
+      operationId: registerPushInstallation
+      summary: Register an Android installation for push delivery
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [installationId, token, platform, locale]
+              properties:
+                installationId: { type: string, minLength: 22, maxLength: 128 }
+                token: { type: string, minLength: 20, maxLength: 4096 }
+                platform: { type: string, enum: [android] }
+                locale: { type: string, minLength: 2, maxLength: 35 }
+      responses:
+        '200':
+          description: Registration request accepted without issuing a credential
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status: { type: string, enum: [registered] }
+        '201':
+          description: Installation registered; credential is returned only on creation
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status, installationCredential]
+                properties:
+                  status: { type: string, enum: [registered] }
+                  installationCredential:
+                    type: string
+                    description: Returned once when a new installation is created
+        '400': { description: Invalid request }
+        '429': { description: Rate limited }
+  /v1/push/installations/{installationId}:
+    parameters:
+      - $ref: '#/components/parameters/InstallationId'
+    patch:
+      operationId: updatePushInstallation
+      summary: Update installation heartbeat and locale
+      security:
+        - installationCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [locale]
+              properties:
+                locale: { type: string, minLength: 2, maxLength: 35 }
+      responses:
+        '204': { description: Updated }
+        '401': { description: Authentication failed }
+    delete:
+      operationId: disablePushInstallation
+      summary: Disable an installation
+      security:
+        - installationCredential: []
+      responses:
+        '204': { description: Disabled }
+        '401': { description: Authentication failed }
+  /v1/push/installations/{installationId}/token:
+    parameters:
+      - $ref: '#/components/parameters/InstallationId'
+    put:
+      operationId: rotatePushInstallationToken
+      summary: Rotate an installation push token
+      security:
+        - installationCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties:
+                token: { type: string, minLength: 20, maxLength: 4096 }
+      responses:
+        '204': { description: Token rotated }
+        '401': { description: Authentication failed }
 components:
+  securitySchemes:
+    installationCredential:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque installation credential
+  parameters:
+    InstallationId:
+      name: installationId
+      in: path
+      required: true
+      schema: { type: string, minLength: 22, maxLength: 128 }
   schemas:
     HealthResponse:
       type: object

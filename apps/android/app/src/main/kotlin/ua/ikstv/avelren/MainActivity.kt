@@ -1,19 +1,46 @@
 package ua.ikstv.avelren
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import ua.ikstv.avelren.repository.ApiWorkloadRepository
 import ua.ikstv.avelren.repository.WorkloadRepository
 import ua.ikstv.avelren.ui.AvelrenApp
+import ua.ikstv.avelren.push.shouldRequestNotificationPermission
 
 class MainActivity : ComponentActivity() {
     private val workloadRepository: WorkloadRepository = ApiWorkloadRepository()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestNotificationPermissionOnce()
         setContent {
             AvelrenApp(workloadRepository = workloadRepository)
         }
+    }
+
+    private fun requestNotificationPermissionOnce() {
+        val preferences = getSharedPreferences("avelren_permission_state", MODE_PRIVATE)
+        if (!shouldRequestNotificationPermission(
+                Build.VERSION.SDK_INT,
+                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+                    PackageManager.PERMISSION_GRANTED,
+                preferences.getBoolean("notification_permission_requested", false),
+            )) return
+        preferences.edit().putBoolean("notification_permission_requested", true).apply()
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+            NOTIFICATION_PERMISSION_REQUEST,
+        )
+    }
+
+    private companion object {
+        const val NOTIFICATION_PERMISSION_REQUEST = 301
     }
 }
