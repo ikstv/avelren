@@ -7,15 +7,28 @@ import { runMigrations } from "./storage/migrations.js";
 import { PostgresCollectorStore } from "./storage/postgres-collector-store.js";
 import { SnapshotWorkloadProvider } from "./workload/snapshot-workload-provider.js";
 import type { WorkloadProvider } from "./workload/workload.js";
+import { randomUUID } from "node:crypto";
+import { parsePushConfig } from "./push/config.js";
+import { PostgresDeviceRegistrationService } from "./push/device-registration.js";
+import { PostgresNotificationOutboxStore } from "./push/outbox-store.js";
+import { FcmHttpV1Provider, GoogleAdcAccessTokenProvider } from "./push/provider.js";
+import { TokenCrypto } from "./push/token-crypto.js";
+import { NotificationWorker } from "./push/worker.js";
 
 const demoMode = parseDemoMode(process.env.AVELREN_DEMO_MODE);
 const storageConfig = parseStorageConfig(process.env);
+const pushConfig = parsePushConfig(process.env);
 if (demoMode && storageConfig.mode === "postgres") {
   throw new Error("AVELREN_DEMO_MODE cannot be used with PostgreSQL storage");
+}
+if (pushConfig.enabled && storageConfig.mode !== "postgres") {
+  throw new Error("Push requires PostgreSQL storage");
 }
 
 let pool: Pool | undefined;
 let workloadProvider: WorkloadProvider;
+let pushRegistrationService: PostgresDeviceRegistrationService | undefined;
+let notificationWorker: NotificationWorker | undefined;
 if (storageConfig.mode === "postgres") {
   pool = new Pool({ connectionString: storageConfig.databaseUrl });
   try {
@@ -27,16 +40,60 @@ if (storageConfig.mode === "postgres") {
   workloadProvider = new SnapshotWorkloadProvider({
     snapshotStore: new PostgresCollectorStore(pool),
   });
+  if (pushConfig.enabled) {
+    if (!pushConfig.keyring || !pushConfig.projectId) {
+      throw new Error("Push configuration is incomplete");
+    }
+    const tokenCrypto = new TokenCrypto(pushConfig.keyring);
+    pushRegistrationService = new PostgresDeviceRegistrationService(pool, tokenCrypto);
+    notificationWorker = new NotificationWorker(
+      new PostgresNotificationOutboxStore(pool),
+      new FcmHttpV1Provider(
+        pushConfig.projectId,
+        new GoogleAdcAccessTokenProvider(),
+        pushConfig.providerTimeoutMs,
+      ),
+      tokenCrypto,
+      {
+        owner: process.env.AVELREN_INSTANCE_ID ?? randomUUID(),
+        batchSize: pushConfig.batchSize,
+        concurrency: pushConfig.concurrency,
+        claimTtlMs: pushConfig.claimTtlMs,
+        maxAttempts: pushConfig.maxAttempts,
+        retryBaseMs: pushConfig.retryBaseMs,
+        retryMaxMs: pushConfig.retryMaxMs,
+      },
+    );
+  }
 } else {
   workloadProvider = demoMode
     ? InMemoryWorkloadProvider.demo()
     : new InMemoryWorkloadProvider();
 }
 
-const app = buildApp({ logger: true, workloadProvider });
+const app = buildApp({
+  logger: true,
+  workloadProvider,
+  ...(pushRegistrationService ? { pushRegistrationService } : {}),
+});
+let workerTimer: NodeJS.Timeout | undefined;
+if (notificationWorker) {
+  const worker = notificationWorker;
+  workerTimer = setInterval(() => {
+    void worker.runOnce().catch(() => {
+      app.log.error({ code: "push_worker_failed" }, "Push worker cycle failed");
+    });
+  }, pushConfig.workerIntervalMs);
+  workerTimer.unref();
+  void worker.runOnce().catch(() => {
+    app.log.error({ code: "push_worker_failed" }, "Push worker cycle failed");
+  });
+}
 if (pool !== undefined) {
   const databasePool = pool;
   app.addHook("onClose", async () => {
+    if (workerTimer) clearInterval(workerTimer);
+    await notificationWorker?.stop();
     await databasePool.end();
   });
 }

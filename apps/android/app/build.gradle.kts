@@ -34,6 +34,11 @@ require('"' !in configuredApiBaseUrl && '\\' !in configuredApiBaseUrl) {
     "AVELREN_API_BASE_URL contains unsupported characters"
 }
 
+fun optionalBuildValue(name: String): String =
+    providers.gradleProperty(name).orNull.orEmpty().also { value ->
+        require('"' !in value && '\\' !in value) { "$name contains unsupported characters" }
+    }
+
 android {
     namespace = "ua.ikstv.avelren"
     compileSdk = 37
@@ -50,6 +55,10 @@ android {
             name = "API_BASE_URL",
             value = "\"$configuredApiBaseUrl\"",
         )
+        buildConfigField("String", "FCM_APPLICATION_ID", "\"${optionalBuildValue("AVELREN_FCM_APPLICATION_ID")}\"")
+        buildConfigField("String", "FCM_PROJECT_ID", "\"${optionalBuildValue("AVELREN_FCM_PROJECT_ID")}\"")
+        buildConfigField("String", "FCM_API_KEY", "\"${optionalBuildValue("AVELREN_FCM_API_KEY")}\"")
+        buildConfigField("String", "FCM_SENDER_ID", "\"${optionalBuildValue("AVELREN_FCM_SENDER_ID")}\"")
     }
 
     buildTypes {
@@ -74,6 +83,8 @@ android {
 }
 
 dependencies {
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))

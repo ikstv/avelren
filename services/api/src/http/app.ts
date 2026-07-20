@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from "fastify";
 
+import { registerPushRoutes, type RegistrationService } from "../push/routes.js";
 import { InMemoryWorkloadProvider } from "../workload/in-memory-workload-provider.js";
 import { MissingWorkloadSnapshotError } from "../workload/in-memory-workload-provider.js";
 import {
@@ -11,6 +12,7 @@ import {
 export interface BuildAppOptions {
   workloadProvider?: WorkloadProvider;
   logger?: boolean;
+  pushRegistrationService?: RegistrationService;
 }
 
 const healthResponseSchema = {
@@ -57,7 +59,7 @@ const workloadUnavailableResponseSchema = {
 } as const;
 
 export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
-  const app = Fastify({ logger: options.logger ?? false });
+  const app = Fastify({ logger: options.logger ?? false, bodyLimit: 16 * 1024 });
   const workloadProvider =
     options.workloadProvider ?? new InMemoryWorkloadProvider();
 
@@ -101,6 +103,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
       }
     },
   );
+
+  if (options.pushRegistrationService) {
+    registerPushRoutes(app, options.pushRegistrationService);
+  }
 
   return app;
 }
