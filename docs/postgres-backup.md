@@ -4,6 +4,8 @@
 
 Workflow використовує окремий Google-акаунт для backup, rclone OAuth і зашифрований Restic repository `rclone:<private-remote>:Avelren Backups/restic`. Назва remote, rclone config і Restic password зберігаються лише в root-only environment/config paths. Google password, app password, OAuth token, email і credentials не додаються до Git.
 
+Restic отримує повний repository URL з backend prefix `rclone:`, а прямі команди rclone отримують той самий remote/path без цього prefix: `<private-remote>:Avelren Backups/restic`.
+
 Створіть окремий Google-акаунт з мінімальним доступом, налаштуйте OAuth rclone на контрольованій машині та перенесіть `rclone.conf` захищеним каналом. Не вставляйте OAuth token у чат, shell history або логи. На сервері `/etc/avelren/backup` має бути `root:root 0700`; `backup.env` і `rclone.conf` — `root:root 0600`, а Restic password — `root:root 0400`. Mode `0600` для password-файла підтримується лише для зворотної сумісності.
 
 Встановіть scripts як root у `/usr/local/libexec/`, units з `deploy/systemd/` у `/etc/systemd/system/`, а `backup.env` — з приватного шаблону `deploy/systemd/avelren-backup.env.example`. Перевірте доступність remote через `rclone lsd` та папки `Avelren Backups` через `rclone lsf`. Repository не ініціалізується автоматично: один раз виконайте явний `avelren-postgres-backup-init`, потім `avelren-postgres-backup-repo-check`.
@@ -17,6 +19,8 @@ Restore drill створює випадкову БД з префіксом `avel
 ## English
 
 The workflow uses a dedicated Google backup account, rclone OAuth, and an encrypted Restic repository at `rclone:<private-remote>:Avelren Backups/restic`. The remote name, rclone config, and Restic password remain in root-only private environment/config paths. Google passwords, app passwords, OAuth tokens, email addresses, and credentials are never committed.
+
+Restic receives the full repository URL with the `rclone:` backend prefix, while direct rclone commands receive the same remote/path without that prefix: `<private-remote>:Avelren Backups/restic`.
 
 Create the dedicated account with least privilege, complete rclone OAuth on a controlled machine, and transfer `rclone.conf` through a protected channel. Never paste an OAuth token into chat, shell history, or logs. On the server, `/etc/avelren/backup` is `root:root 0700`; `backup.env` and `rclone.conf` are `root:root 0600`, while the Restic password is `root:root 0400`. Password-file mode `0600` remains accepted only for backward compatibility.
 

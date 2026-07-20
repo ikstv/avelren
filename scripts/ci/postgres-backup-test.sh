@@ -10,8 +10,15 @@ for script in scripts/backup/postgres-backup.sh scripts/backup/postgres-restore-
   # These are literal source-code assertions.
   # shellcheck disable=SC2016
   grep -Fq 'validate_restic_password_file "$password_file"' "$root/$script"
+  # These are literal source-code assertions.
+  # shellcheck disable=SC2016
+  grep -Fq '. "$script_dir/restic-repository.sh"' "$root/$script"
+  # These are literal source-code assertions.
+  # shellcheck disable=SC2016
+  grep -Fq 'configure_restic_repository "$repo"' "$root/$script"
 done
 test -r "$root/scripts/backup/restic-password-file.sh"
+test -r "$root/scripts/backup/restic-repository.sh"
 grep -Fq '14 * 1024 * 1024 * 1024' "$root/scripts/backup/postgres-backup.sh"
 grep -Fq 'keep-daily 7' "$root/scripts/backup/postgres-backup-prune.sh"
 grep -Fq 'keep-weekly 4' "$root/scripts/backup/postgres-backup-prune.sh"
@@ -69,6 +76,7 @@ FAKE_DOCKER
 cat >"$fake_bin/rclone" <<'FAKE_RCLONE'
 #!/usr/bin/env bash
 set -eu
+printf '%s\n' "$*" >>"$FAKE_RCLONE_CALLS"
 case "$*" in
   *'size --json'*) printf '{"bytes":%s}\n' "${FAKE_REPOSITORY_BYTES:-0}" ;;
   *) exit 0 ;;
@@ -78,6 +86,7 @@ FAKE_RCLONE
 cat >"$fake_bin/restic" <<'FAKE_RESTIC'
 #!/usr/bin/env bash
 set -eu
+printf '%s\n' "${RESTIC_REPOSITORY:-missing}" >>"$FAKE_RESTIC_REPOSITORIES"
 case "$*" in
   *snapshots*) exit 0 ;;
   *backup*) [ "${FAKE_RESTIC_FAIL:-0}" = 1 ] && exit 42 || exit 0 ;;
@@ -101,7 +110,10 @@ chmod 400 "$password"
 if [ "$(id -u)" -ne 0 ]; then
   sudo chown root:root "$config" "$password"
 fi
-root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$test_root/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$test_root/db-created" "FAKE_DB_DROPPED=$test_root/db-dropped")
+rclone_calls="$test_root/rclone-calls"
+restic_repositories="$test_root/restic-repositories"
+touch "$rclone_calls" "$restic_repositories"
+root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$test_root/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$test_root/db-created" "FAKE_DB_DROPPED=$test_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories")
 runner=()
 [ "$(id -u)" -eq 0 ] || runner=(sudo)
 validator="$root/scripts/backup/restic-password-file.sh"
@@ -150,10 +162,31 @@ symlink_fixture="$test_root/symlink-password"
 if run_validator "$symlink_fixture" >/dev/null 2>&1; then
   exit 1
 fi
+repository_validator="$root/scripts/backup/restic-repository.sh"
+run_repository_validator() {
+  # Expansion belongs to the isolated bash process.
+  # shellcheck disable=SC2016
+  env VALIDATOR="$repository_validator" REPOSITORY="$1" bash -c '. "$VALIDATOR"; configure_restic_repository "$REPOSITORY"; test "$RESTIC_REPOSITORY_URL" = "rclone:test-remote:Avelren Backups/restic"; test "$RCLONE_REPOSITORY_PATH" = "test-remote:Avelren Backups/restic"'
+}
+run_repository_validator 'rclone:test-remote:Avelren Backups/restic'
+for invalid_repository in 's3:test-remote:Avelren Backups/restic' 'rclone:rclone:test-remote:Avelren Backups/restic' 'rclone::Avelren Backups/restic' 'rclone:test-remote:'; do
+  if run_repository_validator "$invalid_repository" >/dev/null 2>&1; then exit 1; fi
+done
+if run_repository_validator $'rclone:test-remote:Avelren Backups/restic\ninvalid' >/dev/null 2>&1; then exit 1; fi
+if run_repository_validator $'rclone:test-remote:Avelren Backups/restic\tinvalid' >/dev/null 2>&1; then exit 1; fi
 backup_tmp_is_empty() { [ -z "$("${runner[@]}" find "$backup_tmp" -mindepth 1 -print -quit)" ]; }
 capture_is_runner_readable() { [ -r "$log_root" ] && [ -x "$log_root" ] && [ -f "$1" ] && [ -r "$1" ]; }
 printf '%s\n' 'test' >"$test_root/env"
 printf '%s\n' 'test' >"$test_root/compose.yml"
+
+"${runner[@]}" env "${root_env[@]}" "$root/scripts/backup/postgres-backup-init.sh" >/dev/null
+"${runner[@]}" env "${root_env[@]}" "$root/scripts/backup/postgres-backup-repo-check.sh" >/dev/null
+"${runner[@]}" env "${root_env[@]}" "$root/scripts/backup/postgres-backup-prune.sh" >/dev/null
+grep -Fxq 'lsd test-remote:' "$rclone_calls"
+grep -Fxq 'lsf test-remote:Avelren Backups' "$rclone_calls"
+grep -Fxq 'size --json test-remote:Avelren Backups/restic' "$rclone_calls"
+if grep -Fq 'rclone:test-remote:' "$rclone_calls"; then exit 1; fi
+if grep -Fvxq 'rclone:test-remote:Avelren Backups/restic' "$restic_repositories"; then exit 1; fi
 
 below_warning=$((12 * 1024 * 1024 * 1024 - 1))
 at_warning=$((12 * 1024 * 1024 * 1024))
