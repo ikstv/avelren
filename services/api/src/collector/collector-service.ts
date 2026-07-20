@@ -8,6 +8,10 @@ import {
   type ThresholdEventStore,
 } from "./threshold-event-store.js";
 import type { SnapshotState, SnapshotStore } from "./snapshot-store.js";
+import type {
+  CollectorMutation,
+  CollectorTransactionStore,
+} from "./collector-transaction-store.js";
 import { ThresholdPolicy } from "../thresholds/threshold-policy.js";
 import {
   type WorkloadSnapshot,
@@ -19,6 +23,7 @@ export type Clock = () => Date;
 interface CollectorServiceOptions {
   snapshotStore: SnapshotStore;
   thresholdEventStore: ThresholdEventStore;
+  transactionStore?: CollectorTransactionStore;
   thresholdPolicy?: ThresholdPolicy;
   clock?: Clock;
 }
@@ -29,57 +34,96 @@ export class CollectorService {
   private readonly thresholdPolicy: ThresholdPolicy;
   private readonly snapshotStore: SnapshotStore;
   private readonly thresholdEventStore: ThresholdEventStore;
+  private readonly transactionStore: CollectorTransactionStore | undefined;
   private readonly clock: Clock;
   private queue: Promise<unknown> = Promise.resolve();
 
   public constructor({
     snapshotStore,
     thresholdEventStore,
+    transactionStore,
     thresholdPolicy = new ThresholdPolicy(),
     clock = () => new Date(),
   }: CollectorServiceOptions) {
     this.thresholdPolicy = thresholdPolicy;
     this.snapshotStore = snapshotStore;
     this.thresholdEventStore = thresholdEventStore;
+    this.transactionStore = transactionStore;
     this.clock = clock;
   }
 
   public async ingest(observation: SourceCollectorInput): Promise<void> {
     await this.withLock(async () => {
       const normalized = normalizeSourceObservation(observation);
-      const current = await this.snapshotStore.get(normalized.locationId);
       const now = this.clock();
-
       const observationId = deriveObservationId(normalized);
-      if (current?.latestObservationId === observationId) {
+
+      if (this.transactionStore !== undefined) {
+        await this.transactionStore.applyObservation(
+          normalized,
+          observationId,
+          (current) => this.buildMutation(normalized, observationId, current, now),
+        );
         return;
       }
 
-      const observedAtDate = new Date(normalized.observedAt);
-      if (
-        current !== null &&
-        observedAtDate <= new Date(current.snapshot.observedAt)
-      ) {
-        return;
-      }
-
-      const previousVehicleCount = current?.snapshot.vehicleCount ?? null;
-      const thresholdEvents = this.thresholdPolicy.evaluate(
-        previousVehicleCount,
-        normalized.vehicleCount,
+      const current = await this.snapshotStore.get(normalized.locationId);
+      const mutation = this.buildMutation(
+        normalized,
+        observationId,
+        current,
+        now,
       );
-      const sequence = current === null ? 0 : current.snapshot.sequence + 1;
-      const nextSnapshot: WorkloadSnapshot = {
-        locationId: normalized.locationId,
-        vehicleCount: normalized.vehicleCount,
-        observedAt: normalized.observedAt,
-        receivedAt: now.toISOString(),
-        freshness: "fresh",
-        sequence,
-      };
-      validateWorkloadSnapshot(nextSnapshot);
+      if (mutation === null) {
+        return;
+      }
 
-      const events = thresholdEvents.map((event) =>
+      await this.thresholdEventStore.addPending(mutation.events);
+      try {
+        await this.snapshotStore.set(mutation.state);
+      } catch (error) {
+        await this.thresholdEventStore.removePending(
+          mutation.events.map((event) => event.eventId),
+        );
+        throw error;
+      }
+    });
+  }
+
+  private buildMutation(
+    normalized: SourceObservation,
+    observationId: string,
+    current: SnapshotState | null,
+    now: Date,
+  ): CollectorMutation | null {
+    if (current?.latestObservationId === observationId) {
+      return null;
+    }
+
+    if (
+      current !== null &&
+      new Date(normalized.observedAt) <= new Date(current.snapshot.observedAt)
+    ) {
+      return null;
+    }
+
+    const thresholdEvents = this.thresholdPolicy.evaluate(
+      current?.snapshot.vehicleCount ?? null,
+      normalized.vehicleCount,
+    );
+    const snapshot: WorkloadSnapshot = {
+      locationId: normalized.locationId,
+      vehicleCount: normalized.vehicleCount,
+      observedAt: normalized.observedAt,
+      receivedAt: now.toISOString(),
+      freshness: "fresh",
+      sequence: current === null ? 0 : current.snapshot.sequence + 1,
+    };
+    validateWorkloadSnapshot(snapshot);
+
+    return {
+      state: { snapshot, latestObservationId: observationId },
+      events: thresholdEvents.map((event) =>
         normalizeThresholdEventFromSource(
           normalized.locationId,
           event.threshold,
@@ -88,22 +132,8 @@ export class CollectorService {
           normalized.observedAt,
           now.toISOString(),
         ),
-      );
-
-      await this.thresholdEventStore.addPending(events);
-      try {
-        const nextState: SnapshotState = {
-          snapshot: nextSnapshot,
-          latestObservationId: observationId,
-        };
-        await this.snapshotStore.set(nextState);
-      } catch (error) {
-        await this.thresholdEventStore.removePending(
-          events.map((event) => event.eventId),
-        );
-        throw error;
-      }
-    });
+      ),
+    };
   }
 
   private async withLock<T>(action: () => Promise<T>): Promise<T> {

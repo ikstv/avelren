@@ -1,4 +1,5 @@
 import type { SourceClient } from "./source-client.js";
+import type { CycleLease } from "../lease/cycle-lease.js";
 
 export const MINIMUM_POLL_INTERVAL_MS = 60_000;
 
@@ -13,6 +14,7 @@ export interface PollingCoordinatorOptions<T> {
   onValue: (value: T) => void | Promise<void>;
   onError?: (error: unknown) => void | Promise<void>;
   scheduler?: PollingScheduler;
+  cycleLease?: CycleLease;
 }
 
 const systemScheduler: PollingScheduler = {
@@ -38,6 +40,7 @@ export class PollingCoordinator<T> {
   private readonly onValue: (value: T) => void | Promise<void>;
   private readonly onError: ((error: unknown) => void | Promise<void>) | undefined;
   private readonly scheduler: PollingScheduler;
+  private readonly cycleLease: CycleLease | undefined;
 
   private running = false;
   private timerHandle: unknown;
@@ -52,6 +55,7 @@ export class PollingCoordinator<T> {
     this.onValue = options.onValue;
     this.onError = options.onError;
     this.scheduler = options.scheduler ?? systemScheduler;
+    this.cycleLease = options.cycleLease;
   }
 
   public get isRunning(): boolean {
@@ -107,10 +111,14 @@ export class PollingCoordinator<T> {
     this.activeAbortController = abortController;
 
     try {
-      const value = await this.sourceClient.fetch(abortController.signal);
-
-      if (!abortController.signal.aborted) {
-        await this.onValue(value);
+      if (this.cycleLease === undefined) {
+        await this.fetchAndHandle(abortController.signal);
+      } else {
+        await this.cycleLease.runIfAcquired(async (leaseSignal) => {
+          await this.fetchAndHandle(
+            AbortSignal.any([abortController.signal, leaseSignal]),
+          );
+        });
       }
     } catch (error) {
       const stoppedByCoordinator = abortController.signal.aborted && !this.running;
@@ -122,6 +130,14 @@ export class PollingCoordinator<T> {
       if (this.activeAbortController === abortController) {
         this.activeAbortController = undefined;
       }
+    }
+  }
+
+  private async fetchAndHandle(signal: AbortSignal): Promise<void> {
+    const value = await this.sourceClient.fetch(signal);
+
+    if (!signal.aborted) {
+      await this.onValue(value);
     }
   }
 
