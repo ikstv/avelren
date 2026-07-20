@@ -35,16 +35,18 @@ class AvelrenApplication : Application() {
     }
 
     private fun initializeFirebase(): Boolean {
-        if (FirebaseApp.getApps(this).isNotEmpty()) return true
-        val values = listOf(BuildConfig.FCM_APPLICATION_ID, BuildConfig.FCM_PROJECT_ID,
-            BuildConfig.FCM_API_KEY, BuildConfig.FCM_SENDER_ID)
-        if (values.any(String::isBlank)) return false
-        FirebaseApp.initializeApp(
-            this,
-            FirebaseOptions.Builder().setApplicationId(BuildConfig.FCM_APPLICATION_ID)
-                .setProjectId(BuildConfig.FCM_PROJECT_ID).setApiKey(BuildConfig.FCM_API_KEY)
-                .setGcmSenderId(BuildConfig.FCM_SENDER_ID).build(),
-        )
+        val app = FirebaseApp.getApps(this).firstOrNull() ?: run {
+            val values = listOf(BuildConfig.FCM_APPLICATION_ID, BuildConfig.FCM_PROJECT_ID,
+                BuildConfig.FCM_API_KEY, BuildConfig.FCM_SENDER_ID)
+            if (values.any(String::isBlank)) return false
+            FirebaseApp.initializeApp(
+                this,
+                FirebaseOptions.Builder().setApplicationId(BuildConfig.FCM_APPLICATION_ID)
+                    .setProjectId(BuildConfig.FCM_PROJECT_ID).setApiKey(BuildConfig.FCM_API_KEY)
+                    .setGcmSenderId(BuildConfig.FCM_SENDER_ID).build(),
+            ) ?: return false
+        }
+        AppCheckInitializer.install(app)
         return true
     }
 

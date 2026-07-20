@@ -64,6 +64,8 @@ paths:
       operationId: registerPushInstallation
       summary: Register an Android installation for push delivery
       security: []
+      parameters:
+        - $ref: '#/components/parameters/FirebaseAppCheck'
       requestBody:
         required: true
         content:
@@ -102,10 +104,13 @@ paths:
                     type: string
                     description: Returned once when a new installation is created
         '400': { description: Invalid request }
+        '401': { description: Missing or invalid application attestation }
         '429': { description: Rate limited }
+        '503': { description: Application attestation verifier unavailable }
   /v1/push/installations/{installationId}:
     parameters:
       - $ref: '#/components/parameters/InstallationId'
+      - $ref: '#/components/parameters/FirebaseAppCheck'
     patch:
       operationId: updatePushInstallation
       summary: Update installation heartbeat and locale
@@ -123,7 +128,8 @@ paths:
                 locale: { type: string, minLength: 2, maxLength: 35 }
       responses:
         '204': { description: Updated }
-        '401': { description: Authentication failed }
+        '401': { description: Application attestation or installation authentication failed }
+        '503': { description: Application attestation verifier unavailable }
     delete:
       operationId: disablePushInstallation
       summary: Disable an installation
@@ -131,10 +137,12 @@ paths:
         - installationCredential: []
       responses:
         '204': { description: Disabled }
-        '401': { description: Authentication failed }
+        '401': { description: Application attestation or installation authentication failed }
+        '503': { description: Application attestation verifier unavailable }
   /v1/push/installations/{installationId}/token:
     parameters:
       - $ref: '#/components/parameters/InstallationId'
+      - $ref: '#/components/parameters/FirebaseAppCheck'
     put:
       operationId: rotatePushInstallationToken
       summary: Rotate an installation push token
@@ -152,7 +160,8 @@ paths:
                 token: { type: string, minLength: 20, maxLength: 4096 }
       responses:
         '204': { description: Token rotated }
-        '401': { description: Authentication failed }
+        '401': { description: Application attestation or installation authentication failed }
+        '503': { description: Application attestation verifier unavailable }
 components:
   securitySchemes:
     installationCredential:
@@ -160,6 +169,12 @@ components:
       scheme: bearer
       bearerFormat: opaque installation credential
   parameters:
+    FirebaseAppCheck:
+      name: X-Firebase-AppCheck
+      in: header
+      required: true
+      description: Firebase App Check token for the configured Android application
+      schema: { type: string, minLength: 20, maxLength: 8192 }
     InstallationId:
       name: installationId
       in: path

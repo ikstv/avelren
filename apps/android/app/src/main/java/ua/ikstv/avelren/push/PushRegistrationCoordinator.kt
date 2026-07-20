@@ -30,6 +30,7 @@ class PushRegistrationCoordinator(
                 return
             } catch (error: PushRegistrationException) {
                 last = error
+                if (!error.retryable) throw error
                 if (attempt < 2) sleeper(1_000L shl attempt)
             }
         }

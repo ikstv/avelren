@@ -39,6 +39,15 @@ class PushRegistrationCoordinatorTest {
         assertEquals(null, identity.saved)
     }
 
+    @Test fun `permanent failure is not retried`() = runBlocking {
+        val api = FakeApi(failures = 1, retryable = false)
+        try {
+            PushRegistrationCoordinator(FakeIdentity(), api).registerToken("t".repeat(20), "uk-UA")
+        } catch (_: PushRegistrationException) {
+            assertEquals(1, api.calls)
+        }
+    }
+
     private class FakeIdentity(var saved: String? = null) : PushIdentityStore {
         val values = mutableListOf<String>()
         override fun installationId(): String = "i".repeat(32)
@@ -49,13 +58,14 @@ class PushRegistrationCoordinatorTest {
     private class FakeApi(
         var failures: Int = 0,
         private val registrationCredential: String? = "c".repeat(43),
+        private val retryable: Boolean = true,
     ) : PushRegistrationApi {
         var calls = 0
         var rotated = false
         var didHeartbeat = false
         override suspend fun register(installationId: String, token: String, locale: String): RegistrationResult {
             calls += 1
-            if (failures-- > 0) throw PushRegistrationException()
+            if (failures-- > 0) throw PushRegistrationException(retryable)
             return RegistrationResult(registrationCredential)
         }
         override suspend fun rotate(installationId: String, credential: String, token: String) { rotated = true }

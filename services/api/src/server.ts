@@ -14,10 +14,13 @@ import { PostgresNotificationOutboxStore } from "./push/outbox-store.js";
 import { FcmHttpV1Provider, GoogleAdcAccessTokenProvider } from "./push/provider.js";
 import { TokenCrypto } from "./push/token-crypto.js";
 import { NotificationWorker } from "./push/worker.js";
+import { createAppAttestationVerifier, parseAppAttestationConfig,
+  type AppAttestationVerifier } from "./security/app-attestation.js";
 
 const demoMode = parseDemoMode(process.env.AVELREN_DEMO_MODE);
 const storageConfig = parseStorageConfig(process.env);
 const pushConfig = parsePushConfig(process.env);
+const appAttestationConfig = parseAppAttestationConfig(process.env, pushConfig.enabled);
 if (demoMode && storageConfig.mode === "postgres") {
   throw new Error("AVELREN_DEMO_MODE cannot be used with PostgreSQL storage");
 }
@@ -29,6 +32,10 @@ let pool: Pool | undefined;
 let workloadProvider: WorkloadProvider;
 let pushRegistrationService: PostgresDeviceRegistrationService | undefined;
 let notificationWorker: NotificationWorker | undefined;
+let appAttestationVerifier: AppAttestationVerifier | undefined;
+if (pushConfig.enabled) {
+  appAttestationVerifier = createAppAttestationVerifier(appAttestationConfig);
+}
 if (storageConfig.mode === "postgres") {
   pool = new Pool({ connectionString: storageConfig.databaseUrl });
   try {
@@ -75,6 +82,7 @@ const app = buildApp({
   logger: true,
   workloadProvider,
   ...(pushRegistrationService ? { pushRegistrationService } : {}),
+  ...(appAttestationVerifier ? { appAttestationVerifier } : {}),
 });
 let workerTimer: NodeJS.Timeout | undefined;
 if (notificationWorker) {
