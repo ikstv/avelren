@@ -18,16 +18,28 @@ if [ "$(id -u)" -ne 0 ] && { ! command -v sudo >/dev/null 2>&1 || ! sudo -n true
   exit 0
 fi
 
-test_root="$(mktemp -d)"
+disposable_base="${RUNNER_TEMP:-/tmp}"
+test_root="$(mktemp -d "$disposable_base/avelren-backup-test.XXXXXX")"
+log_root="$(mktemp -d "$disposable_base/avelren-backup-capture.XXXXXX")"
 fake_bin="$test_root/bin"
 backup_tmp="$test_root/backup-tmp"
 mkdir -p "$fake_bin" "$backup_tmp"
-chmod 700 "$test_root" "$backup_tmp"
+chmod 700 "$test_root" "$log_root" "$backup_tmp"
+safe_disposable_path() {
+  case "$1" in
+    "$disposable_base"/avelren-backup-test.*|"$disposable_base"/avelren-backup-capture.*)
+      [ -n "$1" ] && [ "$1" != / ] && [ "$1" != "$HOME" ] && [ ! -L "$1" ] && [ -d "$1" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
 cleanup() {
+  safe_disposable_path "$test_root" || exit 1
+  safe_disposable_path "$log_root" || exit 1
   if [ "$(id -u)" -eq 0 ]; then
-    rm -rf -- "$test_root"
+    rm -rf -- "$test_root" "$log_root"
   else
-    sudo rm -rf -- "$test_root"
+    sudo rm -rf -- "$test_root" "$log_root"
   fi
 }
 trap cleanup EXIT
@@ -84,6 +96,7 @@ root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMP
 runner=()
 [ "$(id -u)" -eq 0 ] || runner=(sudo)
 backup_tmp_is_empty() { [ -z "$("${runner[@]}" find "$backup_tmp" -mindepth 1 -print -quit)" ]; }
+capture_is_runner_readable() { [ -r "$log_root" ] && [ -x "$log_root" ] && [ -f "$1" ] && [ -r "$1" ]; }
 printf '%s\n' 'test' >"$test_root/env"
 printf '%s\n' 'test' >"$test_root/compose.yml"
 
@@ -91,34 +104,38 @@ below_warning=$((12 * 1024 * 1024 * 1024 - 1))
 at_warning=$((12 * 1024 * 1024 * 1024))
 at_hard_stop=$((14 * 1024 * 1024 * 1024))
 
-"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$root/scripts/backup/postgres-backup.sh" >"$test_root/below-warning.log" 2>&1
-if "${runner[@]}" grep -Fq 'Warning: repository reached 12 GiB.' "$test_root/below-warning.log"; then
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$root/scripts/backup/postgres-backup.sh" >"$log_root/below-warning.log" 2>&1
+capture_is_runner_readable "$log_root/below-warning.log"
+if grep -Fq 'Warning: repository reached 12 GiB.' "$log_root/below-warning.log"; then
   exit 1
 fi
 backup_tmp_is_empty
 
-"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$at_warning" "$root/scripts/backup/postgres-backup.sh" >"$test_root/at-warning.log" 2>&1
-"${runner[@]}" grep -Fq 'Warning: repository reached 12 GiB.' "$test_root/at-warning.log"
-if "${runner[@]}" grep -Fq 'Backup stopped: repository reached the 14 GiB hard limit.' "$test_root/at-warning.log"; then
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$at_warning" "$root/scripts/backup/postgres-backup.sh" >"$log_root/at-warning.log" 2>&1
+capture_is_runner_readable "$log_root/at-warning.log"
+grep -Fq 'Warning: repository reached 12 GiB.' "$log_root/at-warning.log"
+if grep -Fq 'Backup stopped: repository reached the 14 GiB hard limit.' "$log_root/at-warning.log"; then
   exit 1
 fi
 backup_tmp_is_empty
 
 set +e
-"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$at_hard_stop" "$root/scripts/backup/postgres-backup.sh" >"$test_root/at-hard-stop.log" 2>&1
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$at_hard_stop" "$root/scripts/backup/postgres-backup.sh" >"$log_root/at-hard-stop.log" 2>&1
 hard_stop_status=$?
 set -e
 [ "$hard_stop_status" -ne 0 ]
-"${runner[@]}" grep -Fq 'Backup stopped: repository reached the 14 GiB hard limit.' "$test_root/at-hard-stop.log"
+capture_is_runner_readable "$log_root/at-hard-stop.log"
+grep -Fq 'Backup stopped: repository reached the 14 GiB hard limit.' "$log_root/at-hard-stop.log"
 backup_tmp_is_empty
 
 set +e
-"${runner[@]}" env "${root_env[@]}" FAKE_RESTIC_FAIL=1 "$root/scripts/backup/postgres-backup.sh" >"$test_root/failure.log" 2>&1
+"${runner[@]}" env "${root_env[@]}" FAKE_RESTIC_FAIL=1 "$root/scripts/backup/postgres-backup.sh" >"$log_root/failure.log" 2>&1
 failure_status=$?
 set -e
 [ "$failure_status" -ne 0 ]
 backup_tmp_is_empty
-if "${runner[@]}" grep -Eq 'fake-secret|password|token' "$test_root/below-warning.log" "$test_root/at-warning.log" "$test_root/at-hard-stop.log" "$test_root/failure.log"; then
+capture_is_runner_readable "$log_root/failure.log"
+if grep -Eq 'fake-secret|password|token' "$log_root/below-warning.log" "$log_root/at-warning.log" "$log_root/at-hard-stop.log" "$log_root/failure.log"; then
   exit 1
 fi
 
