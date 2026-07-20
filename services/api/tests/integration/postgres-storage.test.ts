@@ -226,6 +226,8 @@ describePostgres("PostgreSQL durable collector storage", () => {
 });
 
 async function resetTestDatabase(pool: Pool): Promise<void> {
+  await pool.query("DROP TABLE IF EXISTS notification_outbox");
+  await pool.query("DROP TABLE IF EXISTS push_devices");
   await pool.query("DROP TABLE IF EXISTS collector_leases");
   await pool.query("DROP TABLE IF EXISTS threshold_events");
   await pool.query("DROP TABLE IF EXISTS collector_snapshots");
