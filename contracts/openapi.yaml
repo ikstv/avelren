@@ -37,7 +37,7 @@ paths:
       operationId: getCurrentWorkload
       summary: Отримати поточний стан / Get current workload
       description: |
-        UA: Повертає кешований серверний стан і не запускає опитування джерела.
+        UA: Повертає кешований серверний стан і не запускає опитування відкритого джерела.
         EN: Returns cached server state and never triggers a source poll.
       security: []
       responses:
@@ -50,6 +50,15 @@ paths:
               examples:
                 default:
                   externalValue: ./examples/current-workload.json
+        "503":
+          description: Сервер ще не має знімка / Server has no cached workload snapshot yet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkloadUnavailable"
+              examples:
+                no_snapshot:
+                  externalValue: ./examples/workload-unavailable.json
 components:
   schemas:
     HealthResponse:
@@ -100,3 +109,23 @@ components:
           type: integer
           minimum: 0
           maximum: 9007199254740991
+    WorkloadUnavailable:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+        - message
+        - status
+        - timestamp
+      properties:
+        error:
+          type: string
+          const: snapshot_unavailable
+        message:
+          type: string
+        status:
+          type: integer
+          const: 503
+        timestamp:
+          type: string
+          format: date-time

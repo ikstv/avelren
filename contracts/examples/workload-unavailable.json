@@ -1,0 +1,6 @@
+{
+  "error": "snapshot_unavailable",
+  "message": "Workload snapshot is not available yet",
+  "status": 503,
+  "timestamp": "2026-07-20T08:00:00.000Z"
+}
