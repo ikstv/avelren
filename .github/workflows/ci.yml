@@ -200,3 +200,16 @@ jobs:
       - name: Запустити unit-тести / Run unit tests
         working-directory: apps/android
         run: ./gradlew --no-daemon test
+
+  compose:
+    name: Production Compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Отримати код / Check out code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Перевірити production Compose / Validate production Compose
+        run: docker compose --env-file .env.production.example config --quiet

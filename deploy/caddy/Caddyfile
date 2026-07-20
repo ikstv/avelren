@@ -1,0 +1,38 @@
+{
+	admin off
+	email {$ACME_EMAIL}
+	http_port 8080
+	https_port 8443
+}
+
+http://127.0.0.1:2019 {
+	respond /healthz 200
+}
+
+{$AVELREN_DOMAIN} {
+	encode zstd gzip
+
+	request_body {
+		max_size 16KB
+	}
+
+	header {
+		-Server
+		Content-Security-Policy "default-src 'none'; frame-ancestors 'none'"
+		Referrer-Policy "no-referrer"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+	}
+
+	reverse_proxy api:3000 {
+		health_uri /v1/health
+		health_interval 30s
+		health_timeout 5s
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
