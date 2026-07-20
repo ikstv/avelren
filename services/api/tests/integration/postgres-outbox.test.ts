@@ -101,13 +101,21 @@ integration("PostgreSQL notification outbox", () => {
   });
 
   it("does not re-enable a disabled installation through initial registration", async () => {
-    await registrations.disable(installationId, initialCredential);
-    const before = await deviceState(installationId);
+    const disabledId = `integration_installation_${process.pid}_disabled`;
+    const disabledToken = `integration-token-disabled-${process.pid}-1234567890`;
+    const created = await registrations.register({
+      installationId: disabledId, token: disabledToken, platform: "android", locale: "uk-UA",
+    });
+    const credential = created.installationCredential;
+    expect(credential).toBeDefined();
+    if (!credential) throw new Error("Expected one-time integration credential");
+    await registrations.disable(disabledId, credential);
+    const before = await deviceState(disabledId);
     const result = await registrations.register({
-      installationId, token: initialToken, platform: "android", locale: "en-US",
+      installationId: disabledId, token: disabledToken, platform: "android", locale: "en-US",
     });
     expect(result).toEqual({ status: "registered" });
-    expect(await deviceState(installationId)).toEqual(before);
+    expect(await deviceState(disabledId)).toEqual(before);
   });
 
   it("serializes concurrent initial registrations at the database constraints", async () => {
