@@ -113,6 +113,10 @@ terminate() {
 }
 
 watch_heartbeat() {
+  # An asynchronous shell function inherits the supervisor's variable snapshot
+  # on some /bin/sh implementations. It must never run the supervisor EXIT trap
+  # and delete a successful dump or attempt to reap the supervisor's children.
+  trap - EXIT INT TERM HUP
   supervisor_pid="$1"
   supervisor_start="$2"
   while :; do
