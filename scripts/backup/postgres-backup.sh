@@ -18,10 +18,11 @@ password_file="${AVELREN_RESTIC_PASSWORD_FILE:-/etc/avelren/backup/restic_passwo
 rclone_config="${AVELREN_RCLONE_CONFIG:-/etc/avelren/backup/rclone.conf}"
 pg_database="${AVELREN_PG_DATABASE:-avelren}"
 pg_user="${AVELREN_PG_USER:-avelren}"
+postgres_dump_helper="$script_dir/postgres-tcp-dump.sh"
 compose=(docker compose --env-file "$env_file" --file "$compose_file")
 repo="rclone:${remote}:Avelren Backups/restic"
 configure_restic_repository "$repo" || exit 1
-if [ ! -f "$env_file" ] || [ ! -f "$password_file" ] || [ ! -f "$rclone_config" ]; then
+if [ ! -f "$env_file" ] || [ ! -f "$password_file" ] || [ ! -f "$rclone_config" ] || [ ! -f "$postgres_dump_helper" ]; then
   printf '%s\n' 'Backup configuration is incomplete.' >&2
   exit 1
 fi
@@ -44,7 +45,8 @@ chmod 700 "$tmpdir"
 dump="$tmpdir/avelren-$(date -u +%Y%m%dT%H%M%SZ).dump"
 cleanup() { rm -rf -- "$tmpdir"; }
 trap cleanup EXIT
-if ! "${compose[@]}" exec -T postgres pg_dump --username "$pg_user" --dbname "$pg_database" --format=custom --no-owner --no-acl >"$dump" 2>"$tmpdir/pg_dump.stderr"; then
+if ! "${compose[@]}" exec -T -u 0 postgres sh -s -- "$pg_database" "$pg_user" \
+  <"$postgres_dump_helper" >"$dump" 2>"$tmpdir/pg_dump.stderr"; then
   printf '%s\n' 'PostgreSQL dump failed.' >&2
   exit 1
 fi

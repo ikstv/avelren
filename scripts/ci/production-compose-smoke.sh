@@ -105,6 +105,8 @@ fi
 "${compose[@]}" up -d --wait --wait-timeout 120 postgres
 
 postgres_query() {
+  # Expansion belongs to the isolated shell inside the PostgreSQL container.
+  # shellcheck disable=SC2016
   "${compose[@]}" exec -T -u 0 postgres sh -ec '
     export PGPASSWORD="$(cat /run/secrets/postgres_password)"
     exec psql --host 127.0.0.1 --username "$POSTGRES_USER" \
@@ -112,6 +114,34 @@ postgres_query() {
       --set ON_ERROR_STOP=1 --command "$1"
   ' sh "$1"
 }
+
+backup_helper="$repository_root/scripts/backup/postgres-tcp-dump.sh"
+backup_dump="$temporary_root/postgres.dump"
+backup_log="$temporary_root/postgres-backup-auth.log"
+schema_before="$(postgres_query "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")"
+"${compose[@]}" exec -T -u 0 postgres sh -s -- avelren avelren \
+  <"$backup_helper" >"$backup_dump" 2>"$backup_log"
+[ -s "$backup_dump" ]
+"${compose[@]}" exec -T postgres pg_restore --list <"$backup_dump" >/dev/null
+schema_after="$(postgres_query "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")"
+[ "$schema_before" = "$schema_after" ]
+[ -z "$("${compose[@]}" exec -T postgres find /tmp -maxdepth 1 -name 'avelren-pgpass.*' -print -quit)" ]
+if grep -Fq -f "$secret_directory/postgres_password" "$backup_log"; then
+  printf '%s\n' 'PostgreSQL password leaked into backup output.' >&2
+  exit 1
+fi
+
+wrong_password_file=/tmp/avelren-wrong-password
+# Expansion belongs to the isolated shell inside the disposable PostgreSQL container.
+# shellcheck disable=SC2016
+"${compose[@]}" exec -T -u 0 postgres sh -ec \
+  'umask 077; od -An -N32 -tx1 /dev/urandom | tr -d " \n" >"$1"' sh "$wrong_password_file"
+wrong_password_status=0
+"${compose[@]}" exec -T -u 0 -e AVELREN_POSTGRES_PASSWORD_FILE="$wrong_password_file" \
+  postgres sh -s -- avelren avelren <"$backup_helper" >/dev/null 2>>"$backup_log" || wrong_password_status=$?
+"${compose[@]}" exec -T -u 0 postgres rm -f -- "$wrong_password_file"
+[ "$wrong_password_status" -ne 0 ]
+[ -z "$("${compose[@]}" exec -T postgres find /tmp -maxdepth 1 -name 'avelren-pgpass.*' -print -quit)" ]
 
 [ "$(postgres_query 'SELECT current_database()')" = 'avelren' ]
 [ "$(postgres_query 'SELECT current_user')" = 'avelren' ]

@@ -19,6 +19,7 @@ for script in scripts/backup/postgres-backup.sh scripts/backup/postgres-restore-
 done
 test -r "$root/scripts/backup/restic-password-file.sh"
 test -r "$root/scripts/backup/restic-repository.sh"
+test -r "$root/scripts/backup/postgres-tcp-dump.sh"
 grep -Fq '14 * 1024 * 1024 * 1024' "$root/scripts/backup/postgres-backup.sh"
 grep -Fq 'keep-daily 7' "$root/scripts/backup/postgres-backup-prune.sh"
 grep -Fq 'keep-weekly 4' "$root/scripts/backup/postgres-backup-prune.sh"
@@ -65,7 +66,7 @@ args="$*"
 case "$args" in
   *'ps -q postgres'*) printf '%s\n' fake-postgres ;;
   *inspect*) printf '%s\n' healthy ;;
-  *'pg_dump'*) printf '%s\n' fake-custom-format-dump ;;
+  *'exec -T -u 0 postgres sh -s --'*) cat >/dev/null; printf '%s\n' fake-custom-format-dump ;;
   *createdb*) : >"$FAKE_DB_CREATED" ;;
   *dropdb*) : >"$FAKE_DB_DROPPED" ;;
   *psql*) case "$args" in *string_agg*) printf '%s\n' '001,002,003' ;; *) printf '%s\n' t ;; esac ;;
