@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# The single-quoted programs below expand only in isolated container shells.
+# shellcheck disable=SC2016
 set -Eeuo pipefail
 
 [ "$(id -u)" -eq 0 ] || { printf '%s\n' 'Compose cancellation test must run as root.' >&2; exit 1; }
@@ -58,7 +60,7 @@ container_exec() { docker exec --user 0 "$container" "$@"; }
 # A lock keeps the real pg_dump child alive without changing the production helper.
 "${compose[@]}" exec -T postgres psql --username avelren --dbname avelren --no-psqlrc \
   --set ON_ERROR_STOP=1 --command 'CREATE TABLE IF NOT EXISTS public.backup_cancel_fixture (id integer)' >/dev/null
-container_exec sh -c 'echo $$ > /tmp/avelren-backup-locker.pid; exec su-exec postgres psql --username avelren --dbname avelren --no-psqlrc --set ON_ERROR_STOP=1 --command "BEGIN; LOCK TABLE public.backup_cancel_fixture IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(120)"' &
+docker exec --user postgres "$container" sh -c 'echo $$ > /tmp/avelren-backup-locker.pid; exec psql --username avelren --dbname avelren --no-psqlrc --set ON_ERROR_STOP=1 --command "BEGIN; LOCK TABLE public.backup_cancel_fixture IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(120)"' &
 locker_exec_pid=$!
 for _ in $(seq 1 100); do
   locker_pid="$(container_exec sh -c 'cat /tmp/avelren-backup-locker.pid 2>/dev/null || true')"
@@ -158,9 +160,11 @@ run_cancel_case() {
   for identity in "$supervisor_identity" "$dump_identity" "$watchdog_identity"; do
     identity_is_live "$identity"
     pid="${identity%%:*}"
-    container_exec sh -c 'tr "\\000" " " <"/proc/$1/cmdline"' sh "$pid" >>"$argv_file"
-    printf '\n' >>"$argv_file"
-    container_exec sh -c 'tr "\\000" "\n" <"/proc/$1/environ"' sh "$pid" >>"$argv_file"
+    {
+      container_exec sh -c 'tr "\\000" " " <"/proc/$1/cmdline"' sh "$pid"
+      printf '\n'
+      container_exec sh -c 'tr "\\000" "\n" <"/proc/$1/environ"' sh "$pid"
+    } >>"$argv_file"
   done
 
   kill -s "$signal" "$outer_pid"
@@ -175,7 +179,7 @@ run_cancel_case() {
       exit 1
     fi
   done
-  ! container_exec test -e "$control_dir"
+  if container_exec test -e "$control_dir"; then exit 1; fi
   [ -z "$(container_exec find /tmp -maxdepth 2 -name 'pgpass.*' -print -quit)" ]
   unrelated_is_live "$sentinel_pid" "$sentinel_start"
   unrelated_is_live "$locker_pid" "$locker_start"

@@ -32,7 +32,7 @@ fi
 if [ "$(id -u)" -ne 0 ]; then
   nonroot_log="$(mktemp "${RUNNER_TEMP:-/tmp}/avelren-backup-nonroot.XXXXXX")"
   nonroot_status=0
-  AVELREN_RCLONE_REMOTE=test "$root/scripts/backup/postgres-backup.sh" >"$nonroot_log" 2>&1 || nonroot_status=$?
+  env AVELREN_RCLONE_REMOTE=test "$root/scripts/backup/postgres-backup.sh" >"$nonroot_log" 2>&1 || nonroot_status=$?
   [ "$nonroot_status" -ne 0 ]
   grep -Fq 'This backup must run as root.' "$nonroot_log"
   rm -f -- "$nonroot_log"

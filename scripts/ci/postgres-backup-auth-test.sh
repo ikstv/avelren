@@ -114,6 +114,8 @@ run_password_case 'fixture-database-credential' '127.0.0.1:5432:avelren:avelren:
 run_password_case 'back\slash' '127.0.0.1:5432:avelren:avelren:back\\slash'
 run_password_case 'colon:value' '127.0.0.1:5432:avelren:avelren:colon\:value'
 run_password_case 'star*value' '127.0.0.1:5432:avelren:avelren:star*value'
+# These metacharacters are intentional literal password and pgpass fixtures.
+# shellcheck disable=SC2016
 run_password_case 'space \:* $()[]{};&value' '127.0.0.1:5432:avelren:avelren:space \\\:* $()[]{};&value'
 
 new_operation
