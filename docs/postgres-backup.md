@@ -2,124 +2,180 @@
 
 ## Українська
 
-Workflow використовує окремий Google-акаунт для backup, rclone OAuth і зашифрований Restic repository `rclone:<private-remote>:Avelren Backups/restic`. Назва remote, rclone config і Restic password зберігаються лише в root-only environment/config paths. Google password, app password, OAuth token, email і credentials не додаються до Git.
+Backup використовує Restic repository `rclone:<private-remote>:Avelren Backups/restic`. OAuth-конфіг rclone, Restic password і `backup.env` зберігаються лише у root-only paths. Пароль PostgreSQL читається з наявного Docker secret `/run/secrets/postgres_password`; він не передається через argv, host environment або output.
 
-Restic отримує повний repository URL з backend prefix `rclone:`, а прямі команди rclone отримують той самий remote/path без цього prefix: `<private-remote>:Avelren Backups/restic`.
+### Runtime і cancellation model
 
-Створіть окремий Google-акаунт з мінімальним доступом, налаштуйте OAuth rclone на контрольованій машині та перенесіть `rclone.conf` захищеним каналом. Не вставляйте OAuth token у чат, shell history або логи. На сервері `/etc/avelren/backup` має бути `root:root 0700`; `backup.env` і `rclone.conf` — `root:root 0600`, а Restic password — `root:root 0400`. Mode `0600` для password-файла підтримується лише для зворотної сумісності.
+`postgres-backup.sh` запускає detached `docker exec` усередині PostgreSQL-контейнера та підключає `pg_dump` до `127.0.0.1:5432` через SCRAM. Випадковий `PGPASSFILE` (`root:root 0600`), runner і PID/start-time identities існують лише в окремому `tmpfs` `/run/avelren-backup` (`root:root 0700`). Restart або recreate контейнера знищує цей runtime state; PostgreSQL data volume його не містить.
 
-### Встановлення та безпечна заміна
+Перед стартом нова операція fail-closed відмовляється працювати, якщо runtime має state іншої операції. Directory створюється атомарним `mkdir`; collision ніколи не перезаписує runner, heartbeat чи identity і повторюється не більше п’яти разів. `flock` додатково забороняє конкурентні host-side backup-и.
 
-Усі файли встановлює root. Джерела `scripts/backup/postgres-tcp-dump.sh`, `postgres-backup-control.sh`, `restic-password-file.sh` і `restic-repository.sh` мають відповідати destination-файлам з тими самими назвами в `/usr/local/libexec/`; owner/group — `root:root`, mode — `0755`. Потім `scripts/backup/postgres-backup.sh` встановлюється як `/usr/local/libexec/avelren-postgres-backup` (`root:root 0755`). Команди для init, repository check, prune і restore drill відповідно встановлюються як `/usr/local/libexec/avelren-postgres-backup-init`, `/usr/local/libexec/avelren-postgres-backup-repo-check`, `/usr/local/libexec/avelren-postgres-backup-prune` і `/usr/local/libexec/avelren-postgres-restore-drill` (`root:root 0755`).
+При SIGINT/SIGTERM controller надсилає TERM лише supervisor перевіреної операції. Supervisor робить для `pg_dump`: TERM → bounded wait → KILL → `wait`, потім так само завершує і reap-ить watchdog та виходить останнім. Host escalation перевіряє operation ID, PID, `/proc` start time і operation token повторно безпосередньо перед кожним scoped signal. Це defense against PID reuse/stale identifiers, а не абсолютна атомарна гарантія kernel-level identity-and-signal. SIGINT повертає 130, SIGTERM — 143.
 
-Перед новим встановленням timer має залишатися disabled; перед upgrade його треба зупинити. Кожний script спочатку копіюється через `install -o root -g root -m 0755` у прихований temporary-файл у `/usr/local/libexec/`, а потім замінюється `mv -T` у межах тієї самої filesystem. Порядок replacement: спочатку `postgres-tcp-dump.sh`, `postgres-backup-control.sh` і два `restic-*.sh`; потім чотири допоміжні команди; основний `avelren-postgres-backup` — останнім. Це не залишає новий main script зі старим helper. Не запускайте backup між кроками.
+Якщо Docker daemon недоступний, controller не вгадує PID і не видаляє неперевірений state. Після відновлення daemon живий watchdog завершує операцію; restart/recreate контейнера гарантовано очищає tmpfs. Paused/frozen контейнер не може виконувати traps або watchdog: credential залишається root-only у RAM tmpfs до unpause з cleanup або restart/recreate. Timer не слід перезапускати, доки попередній state не зник і контейнер не healthy.
 
-Нижче `release_root` — абсолютний шлях до перевіреного checkout одного release. Команди виконуються послідовно з `set -eu`:
+Custom dump створюється з `--no-owner --no-acl`, копіюється на host лише після status `0`, перевіряється `pg_restore --list`, шифрується Restic і після цього видаляється з root-only temporary directory. Backup не виконує SQL mutation. Prune є окремою командою: 7 daily, 4 weekly, 3 monthly; warning — 12 GiB, hard stop нових backup-ів — 14 GiB.
+
+### Точна процедура install/upgrade
+
+Команди нижче виконує root. `release_root` — абсолютний шлях до перевіреного checkout; `deploy_root` — `/opt/avelren`. Не продовжуйте після будь-якої помилки.
 
 ```bash
-release_root=/absolute/path/to/avelren
+set -eu
+release_root="$(git rev-parse --show-toplevel)"
+deploy_root=/opt/avelren
+compose=(docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml)
+rollback_root="/var/backups/avelren-backup-release/$(date -u +%Y%m%dT%H%M%SZ)"
+
 for timer in avelren-postgres-backup.timer avelren-postgres-repo-check.timer; do
-  if [ -e "/etc/systemd/system/$timer" ]; then systemctl stop "$timer"; fi
+  systemctl cat "$timer" >/dev/null 2>&1 || continue
+  systemctl disable --now "$timer"
 done
-install -o root -g root -m 0755 "$release_root/scripts/backup/postgres-tcp-dump.sh" /usr/local/libexec/.postgres-tcp-dump.sh.new
-mv -T /usr/local/libexec/.postgres-tcp-dump.sh.new /usr/local/libexec/postgres-tcp-dump.sh
-install -o root -g root -m 0755 "$release_root/scripts/backup/postgres-backup-control.sh" /usr/local/libexec/.postgres-backup-control.sh.new
-mv -T /usr/local/libexec/.postgres-backup-control.sh.new /usr/local/libexec/postgres-backup-control.sh
-for name in restic-password-file restic-repository; do
+for unit in avelren-postgres-backup.service avelren-postgres-repo-check.service; do
+  systemctl cat "$unit" >/dev/null 2>&1 && systemctl stop "$unit"
+  if systemctl is-active --quiet "$unit"; then echo "ABORT: $unit is still active" >&2; exit 1; fi
+done
+
+# Старий і новий runtime paths мають не містити активної операції.
+"${compose[@]}" exec -T -u 0 postgres sh -eu -c '
+  for item in /tmp/avelren-pg-backup.* /run/avelren-backup/operation.*; do
+    [ ! -e "$item" ] || { echo active-backup-operation >&2; exit 1; }
+  done
+'
+
+install -d -o root -g root -m 0700 "$rollback_root/libexec" "$rollback_root/systemd"
+for file in /usr/local/libexec/postgres-tcp-dump.sh /usr/local/libexec/postgres-backup-control.sh \
+  /usr/local/libexec/restic-password-file.sh /usr/local/libexec/restic-repository.sh \
+  /usr/local/libexec/avelren-postgres-backup /usr/local/libexec/avelren-postgres-backup-init \
+  /usr/local/libexec/avelren-postgres-backup-repo-check /usr/local/libexec/avelren-postgres-backup-prune \
+  /usr/local/libexec/avelren-postgres-restore-drill; do
+  [ ! -e "$file" ] || cp -a -- "$file" "$rollback_root/libexec/"
+done
+for unit in avelren-postgres-backup.service avelren-postgres-backup.timer \
+  avelren-postgres-repo-check.service avelren-postgres-repo-check.timer; do
+  [ ! -e "/etc/systemd/system/$unit" ] || cp -a -- "/etc/systemd/system/$unit" "$rollback_root/systemd/"
+done
+cp -a -- "$deploy_root/docker-compose.yml" "$rollback_root/docker-compose.yml"
+
+# Compose додає ephemeral runtime; validate перед replacement і recreate.
+docker compose --env-file "$deploy_root/.env.production" --file "$release_root/docker-compose.yml" config --quiet
+install -o root -g root -m 0644 "$release_root/docker-compose.yml" "$deploy_root/.docker-compose.yml.new"
+mv -T "$deploy_root/.docker-compose.yml.new" "$deploy_root/docker-compose.yml"
+"${compose[@]}" up -d --no-deps --force-recreate postgres
+"${compose[@]}" up -d --wait --wait-timeout 120 postgres
+container="$("${compose[@]}" ps -q postgres)"
+test -n "$(docker inspect -f '{{with index .HostConfig.Tmpfs "/run/avelren-backup"}}{{.}}{{end}}' "$container")"
+test "$(docker exec -u 0 "$container" stat -c '%u:%g:%a' /run/avelren-backup)" = 0:0:700
+
+# Helper/control/support first; main second.
+for name in postgres-tcp-dump postgres-backup-control restic-password-file restic-repository; do
   install -o root -g root -m 0755 "$release_root/scripts/backup/$name.sh" "/usr/local/libexec/.$name.sh.new"
   mv -T "/usr/local/libexec/.$name.sh.new" "/usr/local/libexec/$name.sh"
 done
 for mapping in \
-  'postgres-backup-init.sh:avelren-postgres-backup-init' \
-  'postgres-backup-repo-check.sh:avelren-postgres-backup-repo-check' \
-  'postgres-backup-prune.sh:avelren-postgres-backup-prune' \
-  'postgres-restore-drill.sh:avelren-postgres-restore-drill'; do
+  postgres-backup-init.sh:avelren-postgres-backup-init \
+  postgres-backup-repo-check.sh:avelren-postgres-backup-repo-check \
+  postgres-backup-prune.sh:avelren-postgres-backup-prune \
+  postgres-restore-drill.sh:avelren-postgres-restore-drill; do
   source_name="${mapping%%:*}"; destination_name="${mapping#*:}"
   install -o root -g root -m 0755 "$release_root/scripts/backup/$source_name" "/usr/local/libexec/.$destination_name.new"
   mv -T "/usr/local/libexec/.$destination_name.new" "/usr/local/libexec/$destination_name"
 done
 install -o root -g root -m 0755 "$release_root/scripts/backup/postgres-backup.sh" /usr/local/libexec/.avelren-postgres-backup.new
 mv -T /usr/local/libexec/.avelren-postgres-backup.new /usr/local/libexec/avelren-postgres-backup
-```
 
-Лише після scripts так само безпечно встановіть `deploy/systemd/avelren-postgres-backup.service`, `avelren-postgres-backup.timer`, `avelren-postgres-repo-check.service` і `avelren-postgres-repo-check.timer` як однойменні `/etc/systemd/system/*` (`root:root 0644`), потім виконайте `systemctl daemon-reload`. `backup.env` створюється з приватного `deploy/systemd/avelren-backup.env.example` як `/etc/avelren/backup/backup.env` (`root:root 0600`); він не замінюється з Git поверх реальних credentials.
-
-```bash
-for unit in avelren-postgres-backup.service avelren-postgres-backup.timer avelren-postgres-repo-check.service avelren-postgres-repo-check.timer; do
+# Units only after scripts.
+for unit in avelren-postgres-backup.service avelren-postgres-backup.timer \
+  avelren-postgres-repo-check.service avelren-postgres-repo-check.timer; do
   install -o root -g root -m 0644 "$release_root/deploy/systemd/$unit" "/etc/systemd/system/.$unit.new"
   mv -T "/etc/systemd/system/.$unit.new" "/etc/systemd/system/$unit"
 done
 systemctl daemon-reload
 ```
 
-До enable/start timer виконайте `bash -n /usr/local/libexec/{postgres-tcp-dump.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}`, перевірте owner/mode через `stat -c '%U:%G %a %n'`, перевірте кожний deployed script через `cmp -s <release-source> <destination>`, а units — через `systemd-analyze verify`. Також виконайте `docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml config --quiet` і явний `avelren-postgres-backup-repo-check`. Timer заборонено enable/start, якщо helper відсутній, не executable, не збігається з source того самого release або будь-яка перевірка не пройшла. Repository не ініціалізується автоматично: `avelren-postgres-backup-init` виконується окремо лише для нового repository.
+Validation не має placeholders і не запускає backup/restore/prune/init:
 
-Після успішних перевірок timer можна ввімкнути через `systemctl enable --now avelren-postgres-backup.timer avelren-postgres-repo-check.timer` і перевірити через `systemctl status` та `systemctl list-timers`. Rollback починається зі stop/disable обох timer-ів. Атомарно поверніть попередній `avelren-postgres-backup` першим, потім сумісні з ним helper/support scripts, після цього попередні units; виконайте `daemon-reload` і повторіть усі validation-команди. Timer не вмикається, доки повний попередній комплект не відновлено й не перевірено.
+```bash
+set -eu
+release_root="$(git rev-parse --show-toplevel)"
+cmp -s "$release_root/docker-compose.yml" /opt/avelren/docker-compose.yml
+for name in postgres-tcp-dump postgres-backup-control restic-password-file restic-repository; do
+  cmp -s "$release_root/scripts/backup/$name.sh" "/usr/local/libexec/$name.sh"
+done
+for mapping in postgres-backup.sh:avelren-postgres-backup postgres-backup-init.sh:avelren-postgres-backup-init \
+  postgres-backup-repo-check.sh:avelren-postgres-backup-repo-check postgres-backup-prune.sh:avelren-postgres-backup-prune \
+  postgres-restore-drill.sh:avelren-postgres-restore-drill; do
+  cmp -s "$release_root/scripts/backup/${mapping%%:*}" "/usr/local/libexec/${mapping#*:}"
+done
+for file in /usr/local/libexec/{postgres-tcp-dump.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}; do
+  test "$(stat -c '%U:%G:%a' "$file")" = root:root:755
+done
+for file in /etc/systemd/system/avelren-postgres-{backup,repo-check}.{service,timer}; do
+  test "$(stat -c '%U:%G:%a' "$file")" = root:root:644
+done
+bash -n /usr/local/libexec/{postgres-tcp-dump.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}
+systemd-analyze verify /etc/systemd/system/avelren-postgres-{backup,repo-check}.{service,timer}
+docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml config --quiet
+test "$(docker exec -u 0 "$(docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml ps -q postgres)" stat -c '%u:%g:%a' /run/avelren-backup)" = 0:0:700
+```
 
-Щоденний backup перевіряє healthy PostgreSQL і підключається до `127.0.0.1:5432` усередині PostgreSQL-контейнера через SCRAM. Пароль читається лише з mounted `postgres_password` secret у випадковий temporary `PGPASSFILE` з mode `0600`; він не передається через arguments або environment. Порожній secret або secret із newline відхиляється. Main script запускає helper через detached `docker exec`, відстежує лише його operation ID, PID і process start time та при SIGINT/SIGTERM виконує scoped TERM→KILL із reap children. Heartbeat watchdog видаляє credential і незавершений dump, якщо host controller зникає. SIGINT повертає `130`, SIGTERM — `143`; для oneshot systemd це коректний cancelled/failed result, а не успішний backup. Backup бере custom-format `pg_dump` з `--no-owner --no-acl`, перевіряє `pg_restore --list`, шифрує dump Restic через rclone і видаляє лише власний root-only temporary directory. `flock` забороняє паралельні запуски. Prune не запускається під час backup: окрема ручна команда зберігає 7 daily, 4 weekly і 3 monthly. При 12 GiB є warning, при 14 GiB нові backup зупиняються без видалення snapshot.
+Лише після PASS усіх команд дозволено `systemctl enable --now avelren-postgres-backup.timer avelren-postgres-repo-check.timer`. Якщо helper відсутній, не executable, не збігається з тим самим release або runtime не tmpfs `0700`, timer запускати заборонено.
 
-Restore drill створює випадкову БД з префіксом `avelren_restore_`, ніколи не використовує production database `avelren`, відновлює останній snapshot, перевіряє migrations `001–003` і основні таблиці. При невизначеній помилці тимчасова БД і файли зберігаються; видаляються лише після повністю успішної перевірки.
+### Rollback
 
-Перевіряйте timer-и через `systemctl list-timers`, `systemctl status avelren-postgres-backup.timer` і weekly repository check. Для credential rotation зупиніть timer, замініть OAuth config/password root-only способом, виконайте repository check і ручний backup, потім увімкніть timer. Після втрати сервера відновіть packages, rclone OAuth config і Restic password з secure escrow, виконайте `restic check`, restore drill і лише потім recovery production.
+```bash
+set -eu
+rollback_root=/var/backups/avelren-backup-release/YYYYmmddTHHMMSSZ
+for timer in avelren-postgres-backup.timer avelren-postgres-repo-check.timer; do
+  systemctl cat "$timer" >/dev/null 2>&1 || continue
+  systemctl disable --now "$timer"
+done
+for unit in avelren-postgres-backup.service avelren-postgres-repo-check.service; do
+  systemctl cat "$unit" >/dev/null 2>&1 && systemctl stop "$unit"
+  systemctl is-active --quiet "$unit" && { echo "ABORT: $unit is still active" >&2; exit 1; } || true
+done
+install -o root -g root -m 0755 "$rollback_root/libexec/avelren-postgres-backup" /usr/local/libexec/.avelren-postgres-backup.rollback
+mv -T /usr/local/libexec/.avelren-postgres-backup.rollback /usr/local/libexec/avelren-postgres-backup
+for file in "$rollback_root"/libexec/*; do
+  [ "${file##*/}" = avelren-postgres-backup ] && continue
+  install -o root -g root -m 0755 "$file" "/usr/local/libexec/.${file##*/}.rollback"
+  mv -T "/usr/local/libexec/.${file##*/}.rollback" "/usr/local/libexec/${file##*/}"
+done
+for file in "$rollback_root"/systemd/*; do install -o root -g root -m 0644 "$file" "/etc/systemd/system/${file##*/}"; done
+install -o root -g root -m 0644 "$rollback_root/docker-compose.yml" /opt/avelren/.docker-compose.yml.rollback
+mv -T /opt/avelren/.docker-compose.yml.rollback /opt/avelren/docker-compose.yml
+systemctl daemon-reload
+docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml config --quiet
+docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml up -d --no-deps --force-recreate postgres
+docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml up -d --wait --wait-timeout 120 postgres
+```
+
+Повторіть validation для попереднього checkout і лише після PASS знову enable/start timers. Repository init, backup, restore і prune не є частиною install або rollback.
 
 ## English
 
-The workflow uses a dedicated Google backup account, rclone OAuth, and an encrypted Restic repository at `rclone:<private-remote>:Avelren Backups/restic`. The remote name, rclone config, and Restic password remain in root-only private environment/config paths. Google passwords, app passwords, OAuth tokens, email addresses, and credentials are never committed.
+Backups use the Restic repository `rclone:<private-remote>:Avelren Backups/restic`. The rclone OAuth config, Restic password, and `backup.env` remain in root-only paths. The PostgreSQL password is read from the existing Docker secret `/run/secrets/postgres_password`; it is never passed through argv, the host environment, or output.
 
-Restic receives the full repository URL with the `rclone:` backend prefix, while direct rclone commands receive the same remote/path without that prefix: `<private-remote>:Avelren Backups/restic`.
+### Runtime and cancellation model
 
-Create the dedicated account with least privilege, complete rclone OAuth on a controlled machine, and transfer `rclone.conf` through a protected channel. Never paste an OAuth token into chat, shell history, or logs. On the server, `/etc/avelren/backup` is `root:root 0700`; `backup.env` and `rclone.conf` are `root:root 0600`, while the Restic password is `root:root 0400`. Password-file mode `0600` remains accepted only for backward compatibility.
+`postgres-backup.sh` starts a detached `docker exec` inside the PostgreSQL container and connects `pg_dump` to `127.0.0.1:5432` with SCRAM. The random `PGPASSFILE` (`root:root 0600`), runner, and PID/start-time identities exist only in dedicated tmpfs `/run/avelren-backup` (`root:root 0700`). Container restart or recreation destroys this runtime state; it never enters the PostgreSQL data volume.
 
-### Installation and safe replacement
+A new operation fails closed when runtime state from another operation exists. Atomic `mkdir` creation never overwrites another runner, heartbeat, or identity, and collision retry is bounded to five attempts. `flock` also prevents concurrent host-side backups.
 
-Root installs every file. Sources `scripts/backup/postgres-tcp-dump.sh`, `postgres-backup-control.sh`, `restic-password-file.sh`, and `restic-repository.sh` map to same-named destinations in `/usr/local/libexec/`, owned by `root:root` with mode `0755`. Then install `scripts/backup/postgres-backup.sh` as `/usr/local/libexec/avelren-postgres-backup` (`root:root 0755`). Install init, repository check, prune, and restore drill as `/usr/local/libexec/avelren-postgres-backup-init`, `/usr/local/libexec/avelren-postgres-backup-repo-check`, `/usr/local/libexec/avelren-postgres-backup-prune`, and `/usr/local/libexec/avelren-postgres-restore-drill` (`root:root 0755`).
+On SIGINT/SIGTERM, the controller sends TERM only to the validated operation supervisor. The supervisor performs TERM → bounded wait → KILL → `wait` for `pg_dump`, then stops and reaps the watchdog, and exits last. Host escalation revalidates the operation ID, PID, `/proc` start time, and operation token immediately before every scoped signal. This is defense against PID reuse/stale identifiers, not an absolute atomic kernel identity-and-signal guarantee. SIGINT returns 130 and SIGTERM returns 143.
 
-Keep the timer disabled for a new installation; stop it before an upgrade. Copy each script with `install -o root -g root -m 0755` to a hidden temporary file in `/usr/local/libexec/`, then replace it using `mv -T` on that same filesystem. Replace `postgres-tcp-dump.sh`, `postgres-backup-control.sh`, and both `restic-*.sh` first; replace the four auxiliary commands next; replace the main `avelren-postgres-backup` last. This prevents a new main script from running with an old helper. Do not run a backup between these steps.
+When the Docker daemon is unavailable, the controller neither guesses a PID nor removes unverified state. A live watchdog completes cancellation after daemon recovery; container restart/recreation guarantees tmpfs cleanup. A paused/frozen container cannot run traps or the watchdog: the credential remains root-only in RAM-backed tmpfs until unpause and cleanup or restart/recreation. Do not restart the timer until the prior state is gone and PostgreSQL is healthy.
 
-In the following commands, `release_root` is the absolute path to one verified release checkout. Run the commands sequentially under `set -eu`:
+The custom dump uses `--no-owner --no-acl`, is copied to the host only after status `0`, is checked with `pg_restore --list`, encrypted with Restic, and removed from its root-only temporary directory. Backup executes no mutating SQL. Prune is separate: 7 daily, 4 weekly, and 3 monthly snapshots; warning at 12 GiB and hard stop for new backups at 14 GiB.
 
-```bash
-release_root=/absolute/path/to/avelren
-for timer in avelren-postgres-backup.timer avelren-postgres-repo-check.timer; do
-  if [ -e "/etc/systemd/system/$timer" ]; then systemctl stop "$timer"; fi
-done
-install -o root -g root -m 0755 "$release_root/scripts/backup/postgres-tcp-dump.sh" /usr/local/libexec/.postgres-tcp-dump.sh.new
-mv -T /usr/local/libexec/.postgres-tcp-dump.sh.new /usr/local/libexec/postgres-tcp-dump.sh
-install -o root -g root -m 0755 "$release_root/scripts/backup/postgres-backup-control.sh" /usr/local/libexec/.postgres-backup-control.sh.new
-mv -T /usr/local/libexec/.postgres-backup-control.sh.new /usr/local/libexec/postgres-backup-control.sh
-for name in restic-password-file restic-repository; do
-  install -o root -g root -m 0755 "$release_root/scripts/backup/$name.sh" "/usr/local/libexec/.$name.sh.new"
-  mv -T "/usr/local/libexec/.$name.sh.new" "/usr/local/libexec/$name.sh"
-done
-for mapping in \
-  'postgres-backup-init.sh:avelren-postgres-backup-init' \
-  'postgres-backup-repo-check.sh:avelren-postgres-backup-repo-check' \
-  'postgres-backup-prune.sh:avelren-postgres-backup-prune' \
-  'postgres-restore-drill.sh:avelren-postgres-restore-drill'; do
-  source_name="${mapping%%:*}"; destination_name="${mapping#*:}"
-  install -o root -g root -m 0755 "$release_root/scripts/backup/$source_name" "/usr/local/libexec/.$destination_name.new"
-  mv -T "/usr/local/libexec/.$destination_name.new" "/usr/local/libexec/$destination_name"
-done
-install -o root -g root -m 0755 "$release_root/scripts/backup/postgres-backup.sh" /usr/local/libexec/.avelren-postgres-backup.new
-mv -T /usr/local/libexec/.avelren-postgres-backup.new /usr/local/libexec/avelren-postgres-backup
-```
+### Exact install/upgrade procedure
 
-Only after the scripts, safely install `deploy/systemd/avelren-postgres-backup.service`, `avelren-postgres-backup.timer`, `avelren-postgres-repo-check.service`, and `avelren-postgres-repo-check.timer` under the same names in `/etc/systemd/system/` (`root:root 0644`), then run `systemctl daemon-reload`. Create `/etc/avelren/backup/backup.env` from the private `deploy/systemd/avelren-backup.env.example` template as `root:root 0600`; never overwrite live credentials from Git.
+Use the complete command blocks in the Ukrainian section above; commands and paths are language-independent. They stop and disable both timers, stop active oneshot services, abort if either service remains active, verify that no old or new runtime operation exists, save an executable rollback set, install and recreate the Compose tmpfs, install helper/control/support scripts first and the main script second, install systemd units last, and run `daemon-reload`.
 
-```bash
-for unit in avelren-postgres-backup.service avelren-postgres-backup.timer avelren-postgres-repo-check.service avelren-postgres-repo-check.timer; do
-  install -o root -g root -m 0644 "$release_root/deploy/systemd/$unit" "/etc/systemd/system/.$unit.new"
-  mv -T "/etc/systemd/system/.$unit.new" "/etc/systemd/system/$unit"
-done
-systemctl daemon-reload
-```
+The validation block contains no source/destination placeholders: `release_root` is resolved from the verified checkout with `git rev-parse`. It compares every exact source/destination pair, verifies ownership/modes and shell syntax, validates systemd units and Compose, and confirms runtime mode `0700`. It does not run backup, restore, prune, or repository initialization. Enable/start timers only after every command passes. A missing, non-executable, mismatched helper or non-tmpfs runtime is an unconditional abort.
 
-Before enabling or starting timers, run `bash -n /usr/local/libexec/{postgres-tcp-dump.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}`, inspect ownership/modes with `stat -c '%U:%G %a %n'`, compare every deployed script to the same release source with `cmp -s <release-source> <destination>`, and validate units with `systemd-analyze verify`. Also run `docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml config --quiet` and the explicit `avelren-postgres-backup-repo-check`. Do not enable/start a timer when a helper is missing, non-executable, differs from the same release source, or any validation fails. Repository initialization is never automatic; run `avelren-postgres-backup-init` separately only for a new repository.
+### Rollback
 
-After successful validation, enable timers with `systemctl enable --now avelren-postgres-backup.timer avelren-postgres-repo-check.timer`, then inspect `systemctl status` and `systemctl list-timers`. For rollback, stop/disable both timers first. Atomically restore the previous `avelren-postgres-backup` first, then its matching helper/support scripts, and finally the previous units; run `daemon-reload` and repeat every validation command. Do not re-enable timers until the complete previous set is restored and verified.
+Use the rollback block above with the exact timestamped `rollback_root`. It stops/disables timers, stops both oneshot services and aborts if they remain active, restores the previous main script before its matching helpers, restores units and Compose, runs `daemon-reload`, recreates PostgreSQL under the previous Compose definition, and requires validation against the previous checkout before timers may be enabled again. Repository initialization, backup, restore, and prune are never part of install or rollback.
 
-The daily job checks PostgreSQL health and connects to `127.0.0.1:5432` inside the PostgreSQL container using SCRAM. The password is read only from the mounted `postgres_password` secret into a random temporary `PGPASSFILE` with mode `0600`; it is never passed through arguments or the environment. An empty secret or one containing a newline is rejected. The main script starts the helper with detached `docker exec`, tracks only its operation ID, PID, and process start time, and performs scoped TERM→KILL plus child reaping after SIGINT/SIGTERM. A heartbeat watchdog removes the credential and incomplete dump if the host controller disappears. SIGINT returns `130` and SIGTERM returns `143`; for the oneshot systemd unit this is a correct cancelled/failed result, never a successful backup. The job creates a custom-format dump with `--no-owner --no-acl`, validates it with `pg_restore --list`, encrypts it through Restic and rclone, and removes only its root-only temporary directory. `flock` prevents overlapping runs. Prune is a separate controlled operation with 7 daily, 4 weekly, and 3 monthly snapshots. A 12 GiB warning is emitted; new backups stop at 14 GiB without deleting existing snapshots.
-
-The restore drill uses a random `avelren_restore_` database, never production database `avelren`, restores the latest snapshot, and verifies migrations `001–003` plus the main tables. An uncertain failure preserves the temporary database and files; cleanup occurs only after every verification succeeds.
-
-Verify timers with `systemctl list-timers`, the daily backup timer, and the weekly repository check. For credential rotation, stop the timer, replace OAuth config/password through a root-only procedure, run repository check and a manual backup, then re-enable the timer. After server loss, recover packages, rclone OAuth config, and the Restic password from secure escrow, run `restic check`, perform a restore drill, and only then plan production recovery.
+The restore drill creates a random `avelren_restore_...` database and refuses any configured production database name other than `avelren`. Unknown failures preserve drill state for investigation; cleanup occurs only after complete validation.

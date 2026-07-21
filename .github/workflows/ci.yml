@@ -235,7 +235,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes shellcheck
-          shellcheck scripts/backup/*.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh
+          shellcheck scripts/backup/*.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
 
       - name: Bash syntax
         run: bash -n scripts/backup/*.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
@@ -243,7 +243,7 @@ jobs:
       - name: Backup failure-path and safety tests
         run: |
           ./scripts/ci/postgres-backup-test.sh
-          ./scripts/ci/postgres-backup-auth-test.sh
+          sudo ./scripts/ci/postgres-backup-auth-test.sh
 
       - name: Secret scan
         shell: bash

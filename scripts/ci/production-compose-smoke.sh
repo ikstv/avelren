@@ -103,6 +103,25 @@ fi
 "${compose[@]}" config --quiet
 "${compose[@]}" up -d --build postgres
 "${compose[@]}" up -d --wait --wait-timeout 120 postgres
+postgres_container="$("${compose[@]}" ps -q postgres)"
+runtime_root=/run/avelren-backup
+[ -n "$(docker inspect -f '{{with index .HostConfig.Tmpfs "/run/avelren-backup"}}{{.}}{{end}}' "$postgres_container")" ]
+[ "$("${compose[@]}" exec -T -u 0 postgres stat -c '%u:%g:%a' "$runtime_root")" = '0:0:700' ]
+
+# A real disposable copy of the mounted credential and its operation state must
+# disappear on container restart because the runtime is a dedicated tmpfs.
+# Expansion belongs to the isolated shell inside the disposable container.
+# shellcheck disable=SC2016
+"${compose[@]}" exec -T -u 0 postgres sh -eu -c '
+  mkdir -m 700 "$1/restart-proof"
+  cp /run/secrets/postgres_password "$1/restart-proof/pgpass.fixture"
+  chmod 600 "$1/restart-proof/pgpass.fixture"
+  [ "$(stat -c "%u:%g:%a" "$1/restart-proof/pgpass.fixture")" = "0:0:600" ]
+' sh "$runtime_root"
+"${compose[@]}" restart postgres >/dev/null
+"${compose[@]}" up -d --wait --wait-timeout 120 postgres
+"${compose[@]}" exec -T -u 0 postgres test ! -e "$runtime_root/restart-proof"
+[ "$("${compose[@]}" exec -T -u 0 postgres stat -c '%u:%g:%a' "$runtime_root")" = '0:0:700' ]
 
 postgres_query() {
   # Expansion belongs to the isolated shell inside the PostgreSQL container.
@@ -120,11 +139,11 @@ backup_dump="$temporary_root/postgres.dump"
 backup_log="$temporary_root/postgres-backup-auth.log"
 schema_before="$(postgres_query "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")"
 operation_id="$(openssl rand -hex 16)"
-control_dir="/tmp/avelren-pg-backup.$operation_id"
+control_dir="$runtime_root/operation.$operation_id"
 # Expansion belongs to the isolated container shell.
 # shellcheck disable=SC2016
 "${compose[@]}" exec -T -u 0 postgres sh -eu -c \
-  'umask 077; install -d -o 0 -g 0 -m 700 "$1"; cat >"$1/runner.sh"; chmod 700 "$1/runner.sh"; date +%s >"$1/heartbeat"' \
+  'umask 077; mkdir -m 700 -- "$1"; cat >"$1/runner.sh"; chmod 700 "$1/runner.sh"; date +%s >"$1/heartbeat"' \
   sh "$control_dir" <"$backup_helper"
 "${compose[@]}" exec -T -u 0 \
   -e "AVELREN_BACKUP_OPERATION_ID=$operation_id" \
@@ -138,24 +157,24 @@ control_dir="/tmp/avelren-pg-backup.$operation_id"
 "${compose[@]}" exec -T postgres pg_restore --list <"$backup_dump" >/dev/null
 schema_after="$(postgres_query "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")"
 [ "$schema_before" = "$schema_after" ]
-[ -z "$("${compose[@]}" exec -T postgres find /tmp -maxdepth 2 -name 'pgpass.*' -print -quit)" ]
+[ -z "$("${compose[@]}" exec -T postgres find "$runtime_root" -maxdepth 2 -name 'pgpass.*' -print -quit)" ]
 if grep -Fq -f "$secret_directory/postgres_password" "$backup_log"; then
   printf '%s\n' 'PostgreSQL password leaked into backup output.' >&2
   exit 1
 fi
 
-wrong_password_file=/tmp/avelren-wrong-password
+wrong_password_file="$runtime_root/avelren-wrong-password"
 # Expansion belongs to the isolated shell inside the disposable PostgreSQL container.
 # shellcheck disable=SC2016
 "${compose[@]}" exec -T -u 0 postgres sh -ec \
   'umask 077; od -An -N32 -tx1 /dev/urandom | tr -d " \n" >"$1"' sh "$wrong_password_file"
 wrong_password_status=0
 wrong_operation_id="$(openssl rand -hex 16)"
-wrong_control_dir="/tmp/avelren-pg-backup.$wrong_operation_id"
+wrong_control_dir="$runtime_root/operation.$wrong_operation_id"
 # Expansion belongs to the isolated container shell.
 # shellcheck disable=SC2016
 "${compose[@]}" exec -T -u 0 postgres sh -eu -c \
-  'umask 077; install -d -o 0 -g 0 -m 700 "$1"; cat >"$1/runner.sh"; chmod 700 "$1/runner.sh"; date +%s >"$1/heartbeat"' \
+  'umask 077; mkdir -m 700 -- "$1"; cat >"$1/runner.sh"; chmod 700 "$1/runner.sh"; date +%s >"$1/heartbeat"' \
   sh "$wrong_control_dir" <"$backup_helper"
 "${compose[@]}" exec -T -u 0 \
   -e "AVELREN_BACKUP_OPERATION_ID=$wrong_operation_id" \

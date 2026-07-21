@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+[ "$(id -u)" -eq 0 ] || { printf '%s\n' 'PostgreSQL auth regression test must run as root.' >&2; exit 1; }
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 helper="$root/scripts/backup/postgres-tcp-dump.sh"
 test_root="$(mktemp -d "${RUNNER_TEMP:-/tmp}/avelren-pgpass-test.XXXXXX")"
@@ -8,14 +10,26 @@ fake_bin="$test_root/bin"
 capture="$test_root/capture"
 secret_file="$test_root/postgres_password"
 expected_pgpass="$test_root/expected-pgpass"
+runtime_root=/run/avelren-backup
+runtime_created=0
 mkdir -p "$fake_bin" "$capture"
 chmod 700 "$test_root" "$capture"
+[ ! -e "$runtime_root" ] || [ -z "$(find "$runtime_root" -mindepth 1 -print -quit)" ] || {
+  printf '%s\n' 'PostgreSQL backup runtime is already in use.' >&2
+  exit 1
+}
+if [ ! -e "$runtime_root" ]; then
+  install -d -o root -g root -m 700 "$runtime_root"
+  runtime_created=1
+fi
 
 cleanup() {
   case "$test_root" in
     "${RUNNER_TEMP:-/tmp}"/avelren-pgpass-test.*) rm -rf -- "$test_root" ;;
     *) printf '%s\n' 'Refusing cleanup outside disposable test scope.' >&2; exit 90 ;;
   esac
+  [ -z "$(find "$runtime_root" -mindepth 1 -print -quit)" ]
+  [ "$runtime_created" -eq 0 ] || rmdir -- "$runtime_root"
 }
 trap cleanup EXIT
 
@@ -62,13 +76,13 @@ chmod 755 "$fake_bin/mktemp" "$fake_bin/chmod" "$fake_bin/stat"
 
 new_operation() {
   operation_id="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-  control_dir="/tmp/avelren-pg-backup.$operation_id"
+  control_dir="/run/avelren-backup/operation.$operation_id"
   mkdir -m 700 "$control_dir"
   date +%s >"$control_dir/heartbeat"
 }
 
 remove_operation() {
-  case "$control_dir" in /tmp/avelren-pg-backup.[a-f0-9]*) rm -rf -- "$control_dir" ;; *) exit 90 ;; esac
+  case "$control_dir" in /run/avelren-backup/operation.[a-f0-9]*) rm -rf -- "$control_dir" ;; *) exit 90 ;; esac
 }
 
 run_helper() {

@@ -75,9 +75,17 @@ set -eu
 args="$*"
 case "$args" in
   *'ps -q postgres'*) printf '%s\n' fake-postgres ;;
-  *inspect*) printf '%s\n' healthy ;;
+  *State.Health.Status*) printf '%s\n' healthy ;;
+  *HostConfig.Tmpfs*) printf '%s\n' 'rw,mode=0700' ;;
+  *'exec --user 0 fake-postgres sh -eu -c'*)
+    [ "${FAKE_STALE_RUNTIME:-0}" = 0 ] || exit 74
+    ;;
   *'exec --interactive --user 0 fake-postgres sh -eu -c'*)
     cat >/dev/null
+    if [ "${FAKE_COLLISION_ONCE:-0}" = 1 ] && [ ! -e "$FAKE_COLLISION_PROOF" ]; then
+      printf '%s\n' 'existing-operation-preserved' >"$FAKE_COLLISION_PROOF"
+      exit 73
+    fi
     printf '%s\n' starting >"$FAKE_DOCKER_STATE"
     ;;
   *'exec --detach --user 0 '*'-env AVELREN_BACKUP_OPERATION_ID='*)
@@ -144,7 +152,7 @@ fi
 rclone_calls="$test_root/rclone-calls"
 restic_repositories="$test_root/restic-repositories"
 touch "$rclone_calls" "$restic_repositories"
-root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$test_root/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$test_root/db-created" "FAKE_DB_DROPPED=$test_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories")
+root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$test_root/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$log_root/db-created" "FAKE_DB_DROPPED=$log_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories" "FAKE_COLLISION_PROOF=$log_root/collision-proof")
 root_env+=("FAKE_DOCKER_STATE=$test_root/docker-state")
 runner=()
 [ "$(id -u)" -eq 0 ] || runner=(sudo)
@@ -231,6 +239,22 @@ if grep -Fq 'Warning: repository reached 12 GiB.' "$log_root/below-warning.log";
 fi
 backup_tmp_is_empty
 
+set +e
+"${runner[@]}" env "${root_env[@]}" FAKE_STALE_RUNTIME=1 FAKE_REPOSITORY_BYTES="$below_warning" \
+  "$root/scripts/backup/postgres-backup.sh" >"$log_root/stale-runtime.log" 2>&1
+stale_runtime_status=$?
+set -e
+[ "$stale_runtime_status" -ne 0 ]
+grep -Fq 'PostgreSQL backup runtime is unsafe or contains operation state.' "$log_root/stale-runtime.log"
+backup_tmp_is_empty
+
+rm -f "$log_root/collision-proof"
+"${runner[@]}" env "${root_env[@]}" FAKE_COLLISION_ONCE=1 FAKE_REPOSITORY_BYTES="$below_warning" \
+  "$root/scripts/backup/postgres-backup.sh" >"$log_root/collision.log" 2>&1
+grep -Fxq 'existing-operation-preserved' "$log_root/collision-proof"
+grep -Fq 'PostgreSQL backup completed.' "$log_root/collision.log"
+backup_tmp_is_empty
+
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$at_warning" "$root/scripts/backup/postgres-backup.sh" >"$log_root/at-warning.log" 2>&1
 capture_is_runner_readable "$log_root/at-warning.log"
 grep -Fq 'Warning: repository reached 12 GiB.' "$log_root/at-warning.log"
@@ -259,11 +283,19 @@ if grep -Eq 'fake-secret|password|token' "$log_root/below-warning.log" "$log_roo
   exit 1
 fi
 
+restore_guard_log="$log_root/restore-guard.log"
+: >"$restore_guard_log" || { printf '%s\n' 'Restore guard harness log setup failed.' >&2; exit 1; }
+[ -w "$restore_guard_log" ] || { printf '%s\n' 'Restore guard harness log is not writable.' >&2; exit 1; }
 set +e
-"${runner[@]}" env "${root_env[@]}" AVELREN_PG_DATABASE=avelren "$root/scripts/backup/postgres-restore-drill.sh" >"$test_root/restore-guard.log" 2>&1
+"${runner[@]}" env "${root_env[@]}" AVELREN_PG_DATABASE=not_avelren "$root/scripts/backup/postgres-restore-drill.sh" >"$restore_guard_log" 2>&1
 restore_status=$?
 set -e
 [ "$restore_status" -ne 0 ]
-[ ! -e "$test_root/db-created" ]
+grep -Fq 'Production database name must remain avelren.' "$restore_guard_log"
+if grep -Fqi 'permission denied' "$restore_guard_log"; then
+  printf '%s\n' 'Restore guard harness failed before executing the guard.' >&2
+  exit 1
+fi
+[ ! -e "$log_root/db-created" ]
 
 printf '%s\n' 'PostgreSQL backup failure-path and cleanup tests passed.'

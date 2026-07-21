@@ -19,7 +19,7 @@ case "$pg_database:$pg_user" in
 esac
 case "$operation_id" in ''|*[!a-f0-9]*) printf '%s\n' 'Backup operation identity is invalid.' >&2; exit 1 ;; esac
 [ "${#operation_id}" -eq 32 ] || { printf '%s\n' 'Backup operation identity is invalid.' >&2; exit 1; }
-[ "$control_dir" = "/tmp/avelren-pg-backup.$operation_id" ] || { printf '%s\n' 'Backup control path is invalid.' >&2; exit 1; }
+[ "$control_dir" = "/run/avelren-backup/operation.$operation_id" ] || { printf '%s\n' 'Backup control path is invalid.' >&2; exit 1; }
 case "$heartbeat_timeout" in ''|*[!0-9]*) exit 1 ;; esac
 [ "$heartbeat_timeout" -ge 5 ] && [ "$heartbeat_timeout" -le 300 ] || exit 1
 case "$termination_timeout" in ''|*[!0-9]*) exit 1 ;; esac
@@ -64,6 +64,17 @@ stop_and_reap() {
   pid="$1"
   [ -n "$pid" ] || return 0
   kill -TERM "$pid" 2>/dev/null || true
+  deadline=$(($(date +%s) + termination_timeout))
+  while kill -0 "$pid" 2>/dev/null; do
+    state="$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null || true)"
+    [ "$state" != Z ] || break
+    [ "$(date +%s)" -lt "$deadline" ] || break
+    sleep 1
+  done
+  if kill -0 "$pid" 2>/dev/null && [ "$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null || true)" != Z ]; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  # This wait is performed by the direct parent and is the actual reap point.
   wait "$pid" 2>/dev/null || true
 }
 
@@ -121,10 +132,11 @@ watch_heartbeat() {
             dump_identity="$(cat "$control_dir/dump.identity")"
             kill -KILL "${dump_identity%%:*}" 2>/dev/null || true
           fi
-          kill -KILL "$supervisor_pid" 2>/dev/null || true
+          # Give the supervisor a second bounded interval to reap the dump.
+          deadline=$(($(date +%s) + termination_timeout))
+          while identity_is_live "$control_dir/supervisor.identity" && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
         fi
       fi
-      rm -rf -- "$control_dir"
       exit 0
     fi
   done

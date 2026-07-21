@@ -68,6 +68,9 @@ printf '%s\n' 'test' >"$test_root/backup.env"
 
 compose=(docker compose --project-name "$project_name" --env-file "$environment_file" --file "$compose_file")
 container_exec() { docker exec --user 0 "$container" "$@"; }
+runtime_root=/run/avelren-backup
+[ -n "$(docker inspect -f '{{with index .HostConfig.Tmpfs "/run/avelren-backup"}}{{.}}{{end}}' "$container")" ]
+[ "$(container_exec stat -c '%u:%g:%a' "$runtime_root")" = '0:0:700' ]
 
 # A lock keeps the real pg_dump child alive without changing the production helper.
 "${compose[@]}" exec -T postgres psql --username avelren --dbname avelren --no-psqlrc \
@@ -108,6 +111,19 @@ unrelated_is_live() {
   [ "$current" = "$start" ]
 }
 
+# A replaced/stale identity must fail closed even when its numeric PID and
+# recorded start time point at a live unrelated process.
+stale_operation_id=00000000000000000000000000000001
+stale_control_dir="$runtime_root/operation.$stale_operation_id"
+container_exec mkdir -m 700 -- "$stale_control_dir"
+container_exec sh -c 'printf "%s:%s\n" "$1" "$2" >"$3/supervisor.identity"' \
+  sh "$sentinel_pid" "$sentinel_start" "$stale_control_dir"
+docker exec --interactive --user 0 "$container" sh -s -- \
+  signal "$stale_control_dir" "$stale_operation_id" supervisor TERM \
+  <"$repository_root/scripts/backup/postgres-backup-control.sh" >/dev/null
+unrelated_is_live "$sentinel_pid" "$sentinel_start"
+container_exec rm -rf -- "$stale_control_dir"
+
 wait_for_outer() {
   pid="$1"
   timeout_seconds="$2"
@@ -119,7 +135,7 @@ wait_for_outer() {
 }
 
 find_control_dir() {
-  container_exec sh -c 'for item in /tmp/avelren-pg-backup.*; do [ -d "$item" ] || continue; printf "%s\n" "$item"; done' \
+  container_exec sh -c 'for item in "$1"/operation.*; do [ -d "$item" ] || continue; printf "%s\n" "$item"; done' sh "$runtime_root" \
     | head -n 1
 }
 
@@ -135,8 +151,10 @@ assert_no_secret() {
 run_cancel_case() {
   signal="$1"
   expected_status="$2"
-  log_file="$test_root/$signal.log"
-  argv_file="$test_root/$signal.argv"
+  dump_mode="${3:-normal}"
+  case_name="$signal-$dump_mode"
+  log_file="$test_root/$case_name.log"
+  argv_file="$test_root/$case_name.argv"
   : >"$argv_file"
 
   env \
@@ -179,6 +197,12 @@ run_cancel_case() {
     } >>"$argv_file"
   done
 
+  if [ "$dump_mode" = stopped ]; then
+    dump_pid="${dump_identity%%:*}"
+    container_exec kill -STOP "$dump_pid"
+    [ "$(container_exec awk '{print $3}' "/proc/$dump_pid/stat")" = T ]
+  fi
+
   kill -s "$signal" "$outer_pid"
   wait_for_outer "$outer_pid" 20 || { printf '%s\n' "Outer backup ignored $signal." >&2; exit 1; }
   actual_status=0
@@ -192,7 +216,7 @@ run_cancel_case() {
     fi
   done
   if container_exec test -e "$control_dir"; then exit 1; fi
-  [ -z "$(container_exec find /tmp -maxdepth 2 -name 'pgpass.*' -print -quit)" ]
+  [ -z "$(container_exec find "$runtime_root" -maxdepth 2 -name 'pgpass.*' -print -quit)" ]
   unrelated_is_live "$sentinel_pid" "$sentinel_start"
   unrelated_is_live "$locker_pid" "$locker_start"
   container_exec pg_isready --username avelren --dbname avelren >/dev/null
@@ -202,6 +226,7 @@ run_cancel_case() {
 
 run_cancel_case INT 130
 run_cancel_case TERM 143
+run_cancel_case TERM 143 stopped
 
 # The old attached implementation is retained only as a negative mutation: its
 # outer shell can exit while docker compose exec and the inner dump remain alive.
@@ -261,17 +286,18 @@ legacy_supervisor_start="$(container_exec awk '{print $22}' "/proc/$legacy_super
 kill -TERM "$legacy_outer_pid"
 legacy_outer_stopped=0
 wait_for_outer "$legacy_outer_pid" 5 && legacy_outer_stopped=1
-legacy_status=0
-if [ "$legacy_outer_stopped" -eq 1 ]; then wait "$legacy_outer_pid" || legacy_status=$?; fi
-legacy_contract_failed=0
-[ "$legacy_outer_stopped" -eq 1 ] || legacy_contract_failed=1
-identity_is_live "$legacy_dump_pid:$legacy_dump_start" && legacy_contract_failed=1
-[ ! -e "$legacy_pgpass" ] || legacy_contract_failed=1
-[ "$legacy_status" -eq 143 ] || legacy_contract_failed=1
-[ "$legacy_contract_failed" -eq 1 ] || {
+if [ "$legacy_outer_stopped" -eq 1 ]; then wait "$legacy_outer_pid" || true; fi
+legacy_reason=
+if identity_is_live "$legacy_dump_pid:$legacy_dump_start"; then
+  legacy_reason=inner-process-survived
+elif container_exec test -e "$legacy_pgpass"; then
+  legacy_reason=credential-remained-in-container
+fi
+[ -n "$legacy_reason" ] || {
   printf '%s\n' 'Legacy attached mutation unexpectedly satisfied the cancellation contract.' >&2
   exit 1
 }
+printf 'Legacy attached mutation rejected: %s.\n' "$legacy_reason"
 assert_no_secret "$legacy_log" /dev/null
 
 # Reap only the exact legacy helper/dump identities captured above.
@@ -287,8 +313,8 @@ container_exec sh -c '
 ' sh "$legacy_supervisor_pid" "$legacy_supervisor_start"
 kill -TERM "$legacy_outer_pid" 2>/dev/null || true
 wait "$legacy_outer_pid" 2>/dev/null || true
-for _ in $(seq 1 100); do [ ! -e "$legacy_pgpass" ] && break; sleep 0.05; done
-[ ! -e "$legacy_pgpass" ]
+for _ in $(seq 1 100); do container_exec test -e "$legacy_pgpass" || break; sleep 0.05; done
+container_exec test ! -e "$legacy_pgpass"
 
-printf '%s\n' 'End-to-end Compose cancellation tests passed for SIGINT and SIGTERM; unrelated processes survived.'
+printf '%s\n' 'End-to-end Compose cancellation tests passed for SIGINT, SIGTERM, and TERM-resistant dump KILL escalation; unrelated processes survived.'
 printf '%s\n' 'Legacy attached docker compose exec mutation was rejected by the same cancellation contract.'

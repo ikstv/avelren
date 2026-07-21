@@ -23,6 +23,7 @@ docker_command_timeout="${AVELREN_BACKUP_DOCKER_TIMEOUT:-5}"
 termination_timeout="${AVELREN_BACKUP_TERMINATION_TIMEOUT:-10}"
 postgres_dump_helper="$script_dir/postgres-tcp-dump.sh"
 postgres_control_helper="$script_dir/postgres-backup-control.sh"
+container_runtime_root=/run/avelren-backup
 compose=(docker compose --env-file "$env_file" --file "$compose_file")
 repo="rclone:${remote}:Avelren Backups/restic"
 container=
@@ -58,12 +59,50 @@ wait_for_operation_stop() {
   return 1
 }
 
+wait_for_role_stop() {
+  role="$1"
+  deadline=$((SECONDS + termination_timeout))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    state="$(control role-state "$control_dir" "$operation_id" "$role" 2>/dev/null || printf '%s\n' unavailable)"
+    case "$state" in running|unavailable) sleep 1 ;; *) return 0 ;; esac
+  done
+  return 1
+}
+
 cancel_operation() {
   [ "$operation_active" -eq 1 ] || return 0
-  control signal "$control_dir" "$operation_id" TERM >/dev/null 2>&1 || true
+  children_stopped=1
+  control signal "$control_dir" "$operation_id" supervisor TERM >/dev/null 2>&1 || true
   if ! wait_for_operation_stop; then
-    control signal "$control_dir" "$operation_id" KILL >/dev/null 2>&1 || true
+    # The supervisor owns and reaps both children. Escalate its dump child
+    # first, then its watchdog, and terminate the supervisor only after both
+    # child identities are gone.
+    control signal "$control_dir" "$operation_id" dump KILL >/dev/null 2>&1 || true
+    wait_for_role_stop dump || children_stopped=0
     wait_for_operation_stop || true
+  fi
+  dump_state="$(control role-state "$control_dir" "$operation_id" dump 2>/dev/null || printf '%s\n' unavailable)"
+  if [ "$dump_state" = running ]; then
+    control signal "$control_dir" "$operation_id" dump KILL >/dev/null 2>&1 || true
+    wait_for_role_stop dump || children_stopped=0
+  elif [ "$dump_state" = unavailable ]; then
+    children_stopped=0
+  fi
+  watchdog_state="$(control role-state "$control_dir" "$operation_id" watchdog 2>/dev/null || printf '%s\n' unavailable)"
+  if [ "$watchdog_state" = running ]; then
+    control signal "$control_dir" "$operation_id" watchdog TERM >/dev/null 2>&1 || true
+    if ! wait_for_role_stop watchdog; then
+      control signal "$control_dir" "$operation_id" watchdog KILL >/dev/null 2>&1 || true
+      wait_for_role_stop watchdog || children_stopped=0
+    fi
+  elif [ "$watchdog_state" = unavailable ]; then
+    children_stopped=0
+  fi
+  if [ "$children_stopped" -eq 1 ]; then
+    if ! wait_for_operation_stop; then
+      control signal "$control_dir" "$operation_id" supervisor KILL >/dev/null 2>&1 || true
+      wait_for_operation_stop || true
+    fi
   fi
   if control cleanup "$control_dir" "$operation_id" >/dev/null 2>&1; then
     operation_active=0
@@ -103,6 +142,20 @@ flock -n 9 || { printf '%s\n' 'Another PostgreSQL backup is running.' >&2; exit 
 container="$("${compose[@]}" ps -q postgres)"
 [ -n "$container" ] || { printf '%s\n' 'PostgreSQL container is unavailable.' >&2; exit 1; }
 [ "$(docker_timed inspect -f '{{.State.Health.Status}}' "$container")" = healthy ] || { printf '%s\n' 'PostgreSQL is not healthy.' >&2; exit 1; }
+[ -n "$(docker_timed inspect -f '{{with index .HostConfig.Tmpfs "/run/avelren-backup"}}{{.}}{{end}}' "$container")" ] || {
+  printf '%s\n' 'PostgreSQL backup runtime is not tmpfs-backed.' >&2
+  exit 1
+}
+# Fail closed on any operation state left in this container boot. It may belong
+# to an active controller and is never removed by a later operation.
+# Expansion belongs to the isolated container shell.
+# shellcheck disable=SC2016
+docker_timed exec --user 0 "$container" sh -eu -c '
+  root="$1"
+  [ -d "$root" ] && [ ! -L "$root" ]
+  [ "$(stat -c "%u:%g:%a" "$root")" = "0:0:700" ]
+  for item in "$root"/operation.*; do [ ! -e "$item" ] || exit 74; done
+' sh "$container_runtime_root" || { printf '%s\n' 'PostgreSQL backup runtime is unsafe or contains operation state.' >&2; exit 1; }
 repo_bytes() { RCLONE_CONFIG="$rclone_config" rclone size --json "$RCLONE_REPOSITORY_PATH" | sed -n 's/.*"bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p'; }
 bytes="$(repo_bytes)"
 case "$bytes" in (''|*[!0-9]*) printf '%s\n' 'Repository size is unavailable.' >&2; exit 1;; esac
@@ -113,17 +166,36 @@ RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$RESTIC_REPOSITORY_URL" restic
 tmpdir="$(mktemp -d -p "$tmp_root" avelren-pg-backup.XXXXXX)"
 chmod 700 "$tmpdir"
 dump="$tmpdir/avelren-$(date -u +%Y%m%dT%H%M%SZ).dump"
-operation_id="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-case "$operation_id" in [a-f0-9][a-f0-9]*) ;; *) exit 1 ;; esac
-[ "${#operation_id}" -eq 32 ] || exit 1
-control_dir="/tmp/avelren-pg-backup.$operation_id"
+create_status=1
+for _ in 1 2 3 4 5; do
+  operation_id="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  case "$operation_id" in ''|*[!a-f0-9]*) exit 1 ;; esac
+  [ "${#operation_id}" -eq 32 ] || exit 1
+  control_dir="$container_runtime_root/operation.$operation_id"
+  create_status=0
+  # mkdir is atomic and deliberately does not accept an existing operation.
+  # Expansion belongs to the isolated container shell.
+  # shellcheck disable=SC2016
+  docker_timed exec --interactive --user 0 "$container" sh -eu -c '
+    umask 077
+    root="$1"; directory="$2"; created=0
+    cleanup() { status=$?; trap - EXIT HUP INT TERM; [ "$status" -eq 0 ] || [ "$created" -eq 0 ] || rm -rf -- "$directory"; exit "$status"; }
+    trap cleanup EXIT
+    trap "exit 129" HUP
+    trap "exit 130" INT
+    trap "exit 143" TERM
+    [ -d "$root" ] && [ ! -L "$root" ] && [ "$(stat -c "%u:%g:%a" "$root")" = "0:0:700" ]
+    if ! mkdir -m 700 -- "$directory"; then [ ! -e "$directory" ] || exit 73; exit 1; fi
+    created=1
+    [ "$(stat -c "%u:%g:%a" "$directory")" = "0:0:700" ]
+    cat >"$directory/runner.sh"
+    chmod 700 "$directory/runner.sh"
+    date +%s >"$directory/heartbeat"
+  ' sh "$container_runtime_root" "$control_dir" <"$postgres_dump_helper" || create_status=$?
+  [ "$create_status" -eq 73 ] || break
+done
+[ "$create_status" -eq 0 ] || { printf '%s\n' 'Could not create isolated PostgreSQL backup operation.' >&2; exit 1; }
 operation_active=1
-
-# Expansion belongs to the isolated container shell.
-# shellcheck disable=SC2016
-docker_timed exec --interactive --user 0 "$container" \
-  sh -eu -c 'umask 077; install -d -o 0 -g 0 -m 700 "$1"; cat >"$1/runner.sh"; chmod 700 "$1/runner.sh"; date +%s >"$1/heartbeat"' \
-  sh "$control_dir" <"$postgres_dump_helper"
 docker_timed exec --detach --user 0 \
   --env "AVELREN_BACKUP_OPERATION_ID=$operation_id" \
   --env "AVELREN_BACKUP_HEARTBEAT_TIMEOUT=$heartbeat_timeout" \
