@@ -16,7 +16,7 @@ case "$pg_database:$pg_user" in
 esac
 
 # Invoked through the EXIT trap.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 cleanup() {
   exit_code=$?
   trap - EXIT
@@ -31,7 +31,7 @@ cleanup() {
 }
 
 # Invoked through signal traps.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 terminate() {
   exit_code="$1"
   trap - INT TERM HUP
