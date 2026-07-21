@@ -48,6 +48,18 @@ exit 94
 EOF
 chmod 755 "$test_root/bin/"*
 
+cat >"$test_root/signal-launch.py" <<'PY'
+#!/usr/bin/env python3
+import os
+import signal
+import sys
+
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+os.execv(sys.argv[1], sys.argv[1:])
+PY
+chmod 755 "$test_root/signal-launch.py"
+
 : >"$test_root/rclone.conf"
 printf '%s' 'disposable-restic-password' >"$test_root/restic_password"
 chmod 600 "$test_root/rclone.conf"
@@ -140,7 +152,7 @@ run_cancel_case() {
     AVELREN_BACKUP_HEARTBEAT_TIMEOUT=10 \
     AVELREN_BACKUP_DOCKER_TIMEOUT=3 \
     AVELREN_BACKUP_TERMINATION_TIMEOUT=4 \
-    "$repository_root/scripts/backup/postgres-backup.sh" >"$log_file" 2>&1 &
+    "$test_root/signal-launch.py" "$repository_root/scripts/backup/postgres-backup.sh" >"$log_file" 2>&1 &
   outer_pid=$!
 
   control_dir=
@@ -223,7 +235,7 @@ env \
   AVELREN_RCLONE_REMOTE=test-remote \
   AVELREN_RESTIC_PASSWORD_FILE="$test_root/restic_password" \
   AVELREN_RCLONE_CONFIG="$test_root/rclone.conf" \
-  "$legacy_dir/postgres-backup.sh" >"$legacy_log" 2>&1 &
+  "$test_root/signal-launch.py" "$legacy_dir/postgres-backup.sh" >"$legacy_log" 2>&1 &
 legacy_outer_pid=$!
 legacy_pgpass=
 for _ in $(seq 1 200); do
