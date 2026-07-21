@@ -150,8 +150,17 @@ control_dir="$runtime_root/operation.$operation_id"
   -e AVELREN_BACKUP_HEARTBEAT_TIMEOUT=30 \
   postgres sh "$control_dir/runner.sh" avelren avelren "$control_dir" "$operation_id" \
   >"$backup_log" 2>&1
-"${compose[@]}" cp "postgres:$control_dir/postgres.dump" "$backup_dump"
 [ "$("${compose[@]}" exec -T postgres cat "$control_dir/status")" = 0 ]
+# The Docker archive API does not reliably traverse tmpfs mounts; stream the
+# already successful custom dump without printing it to the Actions log.
+# Expansion belongs to the isolated container shell.
+# shellcheck disable=SC2016
+"${compose[@]}" exec -T -u 0 postgres sh -eu -c '
+  file="$1"
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -s "$file" ]
+  [ "$(stat -c "%u:%g:%a" "$file")" = "0:0:600" ]
+  cat -- "$file"
+' sh "$control_dir/postgres.dump" >"$backup_dump"
 "${compose[@]}" exec -T -u 0 postgres rm -rf -- "$control_dir"
 [ -s "$backup_dump" ]
 "${compose[@]}" exec -T postgres pg_restore --list <"$backup_dump" >/dev/null

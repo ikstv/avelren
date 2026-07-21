@@ -220,7 +220,16 @@ if [ "$dump_status" -ne 0 ]; then
   printf '%s\n' 'PostgreSQL dump failed.' >&2
   exit 1
 fi
-docker_timed cp "$container:$control_dir/postgres.dump" "$dump" >/dev/null
+# Docker's archive API cannot reliably read a file from a container tmpfs.
+# Stream only the validated dump bytes to the root-only host temporary file.
+# Expansion belongs to the isolated container shell.
+# shellcheck disable=SC2016
+docker_timed exec --user 0 "$container" sh -eu -c '
+  file="$1"
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -s "$file" ]
+  [ "$(stat -c "%u:%g:%a" "$file")" = "0:0:600" ]
+  cat -- "$file"
+' sh "$control_dir/postgres.dump" >"$dump"
 control cleanup "$control_dir" "$operation_id" >/dev/null
 operation_active=0
 [ -s "$dump" ] || { printf '%s\n' 'PostgreSQL dump is empty.' >&2; exit 1; }

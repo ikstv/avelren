@@ -77,6 +77,7 @@ case "$args" in
   *'ps -q postgres'*) printf '%s\n' fake-postgres ;;
   *State.Health.Status*) printf '%s\n' healthy ;;
   *HostConfig.Tmpfs*) printf '%s\n' 'rw,mode=0700' ;;
+  *'exec --user 0 fake-postgres sh -eu -c'*postgres.dump*) printf '%s\n' fake-custom-format-dump ;;
   *'exec --user 0 fake-postgres sh -eu -c'*)
     [ "${FAKE_STALE_RUNTIME:-0}" = 0 ] || exit 74
     ;;
@@ -101,10 +102,6 @@ case "$args" in
     printf '%s\n' missing >"$FAKE_DOCKER_STATE"
     ;;
   *'exec --interactive --user 0 fake-postgres sh -s -- signal '*) cat >/dev/null ;;
-  *'cp fake-postgres:'*)
-    destination="${!#}"
-    printf '%s\n' fake-custom-format-dump >"$destination"
-    ;;
   *createdb*) : >"$FAKE_DB_CREATED" ;;
   *dropdb*) : >"$FAKE_DB_DROPPED" ;;
   *psql*) case "$args" in *string_agg*) printf '%s\n' '001,002,003' ;; *) printf '%s\n' t ;; esac ;;
