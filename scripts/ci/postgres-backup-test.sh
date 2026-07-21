@@ -20,12 +20,22 @@ done
 test -r "$root/scripts/backup/restic-password-file.sh"
 test -r "$root/scripts/backup/restic-repository.sh"
 test -r "$root/scripts/backup/postgres-tcp-dump.sh"
+test -r "$root/scripts/backup/postgres-backup-control.sh"
 grep -Fq '14 * 1024 * 1024 * 1024' "$root/scripts/backup/postgres-backup.sh"
 grep -Fq 'keep-daily 7' "$root/scripts/backup/postgres-backup-prune.sh"
 grep -Fq 'keep-weekly 4' "$root/scripts/backup/postgres-backup-prune.sh"
 grep -Fq 'keep-monthly 3' "$root/scripts/backup/postgres-backup-prune.sh"
 if grep -Eq 'dbname[ =]+avelren.*(dropdb|DROP DATABASE)' "$root/scripts/backup/postgres-restore-drill.sh"; then
   exit 1
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+  nonroot_log="$(mktemp "${RUNNER_TEMP:-/tmp}/avelren-backup-nonroot.XXXXXX")"
+  nonroot_status=0
+  AVELREN_RCLONE_REMOTE=test "$root/scripts/backup/postgres-backup.sh" >"$nonroot_log" 2>&1 || nonroot_status=$?
+  [ "$nonroot_status" -ne 0 ]
+  grep -Fq 'This backup must run as root.' "$nonroot_log"
+  rm -f -- "$nonroot_log"
 fi
 
 if [ "$(id -u)" -ne 0 ] && { ! command -v sudo >/dev/null 2>&1 || ! sudo -n true >/dev/null 2>&1; }; then
@@ -66,7 +76,27 @@ args="$*"
 case "$args" in
   *'ps -q postgres'*) printf '%s\n' fake-postgres ;;
   *inspect*) printf '%s\n' healthy ;;
-  *'exec -T -u 0 postgres sh -s --'*) cat >/dev/null; printf '%s\n' fake-custom-format-dump ;;
+  *'exec --interactive --user 0 fake-postgres sh -eu -c'*)
+    cat >/dev/null
+    printf '%s\n' starting >"$FAKE_DOCKER_STATE"
+    ;;
+  *'exec --detach --user 0 '*'-env AVELREN_BACKUP_OPERATION_ID='*)
+    printf '%s\n' done:0 >"$FAKE_DOCKER_STATE"
+    ;;
+  *'exec --interactive --user 0 fake-postgres sh -s -- heartbeat '*) cat >/dev/null ;;
+  *'exec --interactive --user 0 fake-postgres sh -s -- state '*)
+    cat >/dev/null
+    cat "$FAKE_DOCKER_STATE"
+    ;;
+  *'exec --interactive --user 0 fake-postgres sh -s -- cleanup '*)
+    cat >/dev/null
+    printf '%s\n' missing >"$FAKE_DOCKER_STATE"
+    ;;
+  *'exec --interactive --user 0 fake-postgres sh -s -- signal '*) cat >/dev/null ;;
+  *'cp fake-postgres:'*)
+    destination="${!#}"
+    printf '%s\n' fake-custom-format-dump >"$destination"
+    ;;
   *createdb*) : >"$FAKE_DB_CREATED" ;;
   *dropdb*) : >"$FAKE_DB_DROPPED" ;;
   *psql*) case "$args" in *string_agg*) printf '%s\n' '001,002,003' ;; *) printf '%s\n' t ;; esac ;;
@@ -115,6 +145,7 @@ rclone_calls="$test_root/rclone-calls"
 restic_repositories="$test_root/restic-repositories"
 touch "$rclone_calls" "$restic_repositories"
 root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$test_root/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$test_root/db-created" "FAKE_DB_DROPPED=$test_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories")
+root_env+=("FAKE_DOCKER_STATE=$test_root/docker-state")
 runner=()
 [ "$(id -u)" -eq 0 ] || runner=(sudo)
 validator="$root/scripts/backup/restic-password-file.sh"

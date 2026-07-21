@@ -119,13 +119,26 @@ backup_helper="$repository_root/scripts/backup/postgres-tcp-dump.sh"
 backup_dump="$temporary_root/postgres.dump"
 backup_log="$temporary_root/postgres-backup-auth.log"
 schema_before="$(postgres_query "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")"
-"${compose[@]}" exec -T -u 0 postgres sh -s -- avelren avelren \
-  <"$backup_helper" >"$backup_dump" 2>"$backup_log"
+operation_id="$(openssl rand -hex 16)"
+control_dir="/tmp/avelren-pg-backup.$operation_id"
+# Expansion belongs to the isolated container shell.
+# shellcheck disable=SC2016
+"${compose[@]}" exec -T -u 0 postgres sh -eu -c \
+  'umask 077; install -d -o 0 -g 0 -m 700 "$1"; cat >"$1/runner.sh"; chmod 700 "$1/runner.sh"; date +%s >"$1/heartbeat"' \
+  sh "$control_dir" <"$backup_helper"
+"${compose[@]}" exec -T -u 0 \
+  -e "AVELREN_BACKUP_OPERATION_ID=$operation_id" \
+  -e AVELREN_BACKUP_HEARTBEAT_TIMEOUT=30 \
+  postgres sh "$control_dir/runner.sh" avelren avelren "$control_dir" "$operation_id" \
+  >"$backup_log" 2>&1
+"${compose[@]}" cp "postgres:$control_dir/postgres.dump" "$backup_dump"
+[ "$("${compose[@]}" exec -T postgres cat "$control_dir/status")" = 0 ]
+"${compose[@]}" exec -T -u 0 postgres rm -rf -- "$control_dir"
 [ -s "$backup_dump" ]
 "${compose[@]}" exec -T postgres pg_restore --list <"$backup_dump" >/dev/null
 schema_after="$(postgres_query "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'")"
 [ "$schema_before" = "$schema_after" ]
-[ -z "$("${compose[@]}" exec -T postgres find /tmp -maxdepth 1 -name 'avelren-pgpass.*' -print -quit)" ]
+[ -z "$("${compose[@]}" exec -T postgres find /tmp -maxdepth 2 -name 'pgpass.*' -print -quit)" ]
 if grep -Fq -f "$secret_directory/postgres_password" "$backup_log"; then
   printf '%s\n' 'PostgreSQL password leaked into backup output.' >&2
   exit 1
@@ -137,14 +150,36 @@ wrong_password_file=/tmp/avelren-wrong-password
 "${compose[@]}" exec -T -u 0 postgres sh -ec \
   'umask 077; od -An -N32 -tx1 /dev/urandom | tr -d " \n" >"$1"' sh "$wrong_password_file"
 wrong_password_status=0
-"${compose[@]}" exec -T -u 0 -e AVELREN_POSTGRES_PASSWORD_FILE="$wrong_password_file" \
-  postgres sh -s -- avelren avelren <"$backup_helper" >/dev/null 2>>"$backup_log" || wrong_password_status=$?
+wrong_operation_id="$(openssl rand -hex 16)"
+wrong_control_dir="/tmp/avelren-pg-backup.$wrong_operation_id"
+# Expansion belongs to the isolated container shell.
+# shellcheck disable=SC2016
+"${compose[@]}" exec -T -u 0 postgres sh -eu -c \
+  'umask 077; install -d -o 0 -g 0 -m 700 "$1"; cat >"$1/runner.sh"; chmod 700 "$1/runner.sh"; date +%s >"$1/heartbeat"' \
+  sh "$wrong_control_dir" <"$backup_helper"
+"${compose[@]}" exec -T -u 0 \
+  -e "AVELREN_BACKUP_OPERATION_ID=$wrong_operation_id" \
+  -e AVELREN_BACKUP_HEARTBEAT_TIMEOUT=30 \
+  -e AVELREN_POSTGRES_PASSWORD_FILE="$wrong_password_file" \
+  postgres sh "$wrong_control_dir/runner.sh" avelren avelren "$wrong_control_dir" "$wrong_operation_id" \
+  >/dev/null 2>>"$backup_log" || wrong_password_status=$?
 "${compose[@]}" exec -T -u 0 postgres rm -f -- "$wrong_password_file"
 [ "$wrong_password_status" -ne 0 ]
-[ -z "$("${compose[@]}" exec -T postgres find /tmp -maxdepth 1 -name 'avelren-pgpass.*' -print -quit)" ]
+[ "$("${compose[@]}" exec -T postgres cat "$wrong_control_dir/status")" -ne 0 ]
+[ -z "$("${compose[@]}" exec -T postgres find "$wrong_control_dir" -maxdepth 1 -name 'pgpass.*' -print -quit)" ]
+"${compose[@]}" exec -T -u 0 postgres rm -rf -- "$wrong_control_dir"
 
 [ "$(postgres_query 'SELECT current_database()')" = 'avelren' ]
 [ "$(postgres_query 'SELECT current_user')" = 'avelren' ]
+
+sudo env \
+  "PATH=$PATH" \
+  "COMPOSE_PROJECT_NAME=$project_name" \
+  "AVELREN_TEST_REPOSITORY_ROOT=$repository_root" \
+  "AVELREN_TEST_COMPOSE_FILE=$repository_root/docker-compose.yml" \
+  "AVELREN_TEST_ENV_FILE=$environment_file" \
+  "AVELREN_TEST_ROOT=$temporary_root" \
+  "$repository_root/scripts/ci/postgres-backup-compose-cancel-test.sh"
 
 "${compose[@]}" up -d --build api
 "${compose[@]}" up -d --wait --wait-timeout 180 api

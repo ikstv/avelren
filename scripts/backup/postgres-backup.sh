@@ -18,11 +18,80 @@ password_file="${AVELREN_RESTIC_PASSWORD_FILE:-/etc/avelren/backup/restic_passwo
 rclone_config="${AVELREN_RCLONE_CONFIG:-/etc/avelren/backup/rclone.conf}"
 pg_database="${AVELREN_PG_DATABASE:-avelren}"
 pg_user="${AVELREN_PG_USER:-avelren}"
+heartbeat_timeout="${AVELREN_BACKUP_HEARTBEAT_TIMEOUT:-30}"
+docker_command_timeout="${AVELREN_BACKUP_DOCKER_TIMEOUT:-5}"
+termination_timeout="${AVELREN_BACKUP_TERMINATION_TIMEOUT:-10}"
 postgres_dump_helper="$script_dir/postgres-tcp-dump.sh"
+postgres_control_helper="$script_dir/postgres-backup-control.sh"
 compose=(docker compose --env-file "$env_file" --file "$compose_file")
 repo="rclone:${remote}:Avelren Backups/restic"
+container=
+control_dir=
+operation_id=
+operation_active=0
+tmpdir=
+
+case "$heartbeat_timeout:$docker_command_timeout:$termination_timeout" in *[!0-9:]*) exit 1 ;; esac
+[ "$heartbeat_timeout" -ge 5 ] && [ "$heartbeat_timeout" -le 300 ] || exit 1
+[ "$docker_command_timeout" -ge 1 ] && [ "$docker_command_timeout" -le 30 ] || exit 1
+[ "$termination_timeout" -ge 2 ] && [ "$termination_timeout" -le 60 ] || exit 1
+
+control() {
+  timeout --signal=KILL "$docker_command_timeout" \
+    docker exec --interactive --user 0 "$container" sh -s -- "$@" <"$postgres_control_helper"
+}
+
+docker_timed() {
+  timeout --signal=KILL "$docker_command_timeout" docker "$@"
+}
+
+operation_state() {
+  control state "$control_dir" "$operation_id" 2>/dev/null || printf '%s\n' unavailable
+}
+
+wait_for_operation_stop() {
+  deadline=$((SECONDS + termination_timeout))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    state="$(operation_state)"
+    case "$state" in running|starting|unavailable) sleep 1 ;; *) return 0 ;; esac
+  done
+  return 1
+}
+
+cancel_operation() {
+  [ "$operation_active" -eq 1 ] || return 0
+  control signal "$control_dir" "$operation_id" TERM >/dev/null 2>&1 || true
+  if ! wait_for_operation_stop; then
+    control signal "$control_dir" "$operation_id" KILL >/dev/null 2>&1 || true
+    wait_for_operation_stop || true
+  fi
+  if control cleanup "$control_dir" "$operation_id" >/dev/null 2>&1; then
+    operation_active=0
+  fi
+}
+
+cleanup() {
+  exit_code=$?
+  trap - EXIT INT TERM
+  cancel_operation
+  [ -z "$tmpdir" ] || rm -rf -- "$tmpdir"
+  exit "$exit_code"
+}
+
+terminate() {
+  exit_code="$1"
+  trap '' INT TERM
+  cancel_operation
+  exit "$exit_code"
+}
+
+trap cleanup EXIT
+trap 'terminate 130' INT
+trap 'terminate 143' TERM
+
 configure_restic_repository "$repo" || exit 1
-if [ ! -f "$env_file" ] || [ ! -f "$password_file" ] || [ ! -f "$rclone_config" ] || [ ! -f "$postgres_dump_helper" ]; then
+if [ ! -f "$env_file" ] || [ ! -f "$password_file" ] || [ ! -f "$rclone_config" ] || \
+   [ ! -f "$postgres_dump_helper" ] || [ ! -f "$postgres_control_helper" ]; then
   printf '%s\n' 'Backup configuration is incomplete.' >&2
   exit 1
 fi
@@ -33,23 +102,55 @@ exec 9>"$lock_file"
 flock -n 9 || { printf '%s\n' 'Another PostgreSQL backup is running.' >&2; exit 1; }
 container="$("${compose[@]}" ps -q postgres)"
 [ -n "$container" ] || { printf '%s\n' 'PostgreSQL container is unavailable.' >&2; exit 1; }
-[ "$(docker inspect -f '{{.State.Health.Status}}' "$container")" = healthy ] || { printf '%s\n' 'PostgreSQL is not healthy.' >&2; exit 1; }
+[ "$(docker_timed inspect -f '{{.State.Health.Status}}' "$container")" = healthy ] || { printf '%s\n' 'PostgreSQL is not healthy.' >&2; exit 1; }
 repo_bytes() { RCLONE_CONFIG="$rclone_config" rclone size --json "$RCLONE_REPOSITORY_PATH" | sed -n 's/.*"bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p'; }
 bytes="$(repo_bytes)"
 case "$bytes" in (''|*[!0-9]*) printf '%s\n' 'Repository size is unavailable.' >&2; exit 1;; esac
 [ "$bytes" -lt $((14 * 1024 * 1024 * 1024)) ] || { printf '%s\n' 'Backup stopped: repository reached the 14 GiB hard limit.' >&2; exit 1; }
 [ "$bytes" -lt $((12 * 1024 * 1024 * 1024)) ] || printf '%s\n' 'Warning: repository reached 12 GiB.' >&2
 RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$RESTIC_REPOSITORY_URL" restic snapshots --password-file "$password_file" >/dev/null
+
 tmpdir="$(mktemp -d -p "$tmp_root" avelren-pg-backup.XXXXXX)"
 chmod 700 "$tmpdir"
 dump="$tmpdir/avelren-$(date -u +%Y%m%dT%H%M%SZ).dump"
-cleanup() { rm -rf -- "$tmpdir"; }
-trap cleanup EXIT
-if ! "${compose[@]}" exec -T -u 0 postgres sh -s -- "$pg_database" "$pg_user" \
-  <"$postgres_dump_helper" >"$dump" 2>"$tmpdir/pg_dump.stderr"; then
+operation_id="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+case "$operation_id" in [a-f0-9][a-f0-9]*) ;; *) exit 1 ;; esac
+[ "${#operation_id}" -eq 32 ] || exit 1
+control_dir="/tmp/avelren-pg-backup.$operation_id"
+operation_active=1
+
+# Expansion belongs to the isolated container shell.
+# shellcheck disable=SC2016
+docker_timed exec --interactive --user 0 "$container" \
+  sh -eu -c 'umask 077; install -d -o 0 -g 0 -m 700 "$1"; cat >"$1/runner.sh"; chmod 700 "$1/runner.sh"; date +%s >"$1/heartbeat"' \
+  sh "$control_dir" <"$postgres_dump_helper"
+docker_timed exec --detach --user 0 \
+  --env "AVELREN_BACKUP_OPERATION_ID=$operation_id" \
+  --env "AVELREN_BACKUP_HEARTBEAT_TIMEOUT=$heartbeat_timeout" \
+  --env "AVELREN_BACKUP_TERMINATION_TIMEOUT=$termination_timeout" \
+  "$container" sh "$control_dir/runner.sh" "$pg_database" "$pg_user" "$control_dir" "$operation_id"
+
+startup_deadline=$((SECONDS + docker_command_timeout))
+while :; do
+  control heartbeat "$control_dir" "$operation_id" >/dev/null
+  state="$(operation_state)"
+  case "$state" in
+    done:*) dump_status="${state#done:}"; break ;;
+    running) : ;;
+    starting) [ "$SECONDS" -lt "$startup_deadline" ] || { printf '%s\n' 'PostgreSQL dump process did not start.' >&2; exit 1; } ;;
+    *) printf '%s\n' 'PostgreSQL dump process state is unavailable.' >&2; exit 1 ;;
+  esac
+  sleep 1
+done
+
+case "$dump_status" in ''|*[!0-9]*) exit 1 ;; esac
+if [ "$dump_status" -ne 0 ]; then
   printf '%s\n' 'PostgreSQL dump failed.' >&2
   exit 1
 fi
+docker_timed cp "$container:$control_dir/postgres.dump" "$dump" >/dev/null
+control cleanup "$control_dir" "$operation_id" >/dev/null
+operation_active=0
 [ -s "$dump" ] || { printf '%s\n' 'PostgreSQL dump is empty.' >&2; exit 1; }
 pg_restore --list "$dump" >/dev/null 2>"$tmpdir/pg_restore.stderr" || { printf '%s\n' 'PostgreSQL dump validation failed.' >&2; exit 1; }
 RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$RESTIC_REPOSITORY_URL" restic backup --password-file "$password_file" --tag postgres "$dump" >/dev/null
