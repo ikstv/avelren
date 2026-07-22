@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+# Shared by scripts that source this helper.
+# shellcheck disable=SC2034
+RESTIC_POSTGRES_TAG=postgres
+
 configure_restic_repository() {
   local repository="${1:-}"
   local rclone_path
