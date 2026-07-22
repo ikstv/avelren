@@ -379,6 +379,7 @@ fi
 # Expansion belongs to the isolated container shell.
 # shellcheck disable=SC2016
 transfer_status=0
+# shellcheck disable=SC2016
 docker_transfer_timed exec --user 0 "$container" sh -eu -c '
   file="$1"
   [ -f "$file" ] && [ ! -L "$file" ] && [ -s "$file" ]

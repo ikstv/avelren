@@ -153,6 +153,7 @@ assert_contains "$root/scripts/backup/postgres-backup.sh" 'dump_create_status=$?
 # These are literal source-code assertions.
 # shellcheck disable=SC2016
 assert_contains "$root/scripts/backup/postgres-backup.sh" 'transfer_timeout="${AVELREN_BACKUP_TRANSFER_TIMEOUT:-900}"' transfer-timeout-default
+# shellcheck disable=SC2016
 assert_contains "$root/scripts/backup/postgres-backup.sh" '[ "$transfer_timeout" -ge 30 ] && [ "$transfer_timeout" -le 7200 ]' transfer-timeout-range
 assert_contains "$root/scripts/backup/postgres-backup.sh" 'docker_transfer_timed exec --user 0' transfer-timeout-streaming
 # This is a literal source-code assertion.
