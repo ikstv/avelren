@@ -38,6 +38,7 @@ else
     'historical-nonempty|historical non-empty-only check remains proven unsafe'
     'host-redirection-classification|Bash host redirection behavior is classified'
     'host-dump-mode|host dump is root-owned mode 0600'
+    'harness-ownership-isolation|root-owned production runtime stays inside dedicated leaves'
     'host-existing-symlink|pre-existing dump symlink is rejected'
     'host-existing-symlink-regular|pre-existing symlink to a regular file is rejected'
     'host-existing-dangling-symlink|pre-existing dangling symlink is rejected'
@@ -158,6 +159,9 @@ test_root=
 log_root=
 fake_bin=
 backup_tmp=
+production_lock=
+state_root=
+fixture_root=
 safe_disposable_path() {
   case "$1" in
     "$disposable_base"/avelren-backup-test.*|"$disposable_base"/avelren-backup-capture.*)
@@ -214,9 +218,21 @@ test_root="$(mktemp -d "$disposable_base/avelren-backup-test.XXXXXX")"
 log_root="$(mktemp -d "$disposable_base/avelren-backup-capture.XXXXXX")"
 diagnostics_set_test_id "$test_root"
 fake_bin="$test_root/bin"
-backup_tmp="$test_root/backup-tmp"
-mkdir -p "$fake_bin" "$backup_tmp"
-chmod 700 "$test_root" "$log_root" "$backup_tmp"
+backup_tmp="$test_root/production-tmp"
+production_lock="$test_root/production-lock"
+state_root="$log_root/state"
+fixture_root="$log_root/fixtures"
+mkdir -p "$fake_bin" "$backup_tmp" "$production_lock" "$state_root" "$fixture_root"
+chmod 700 "$test_root" "$log_root" "$backup_tmp" "$production_lock" "$state_root" "$fixture_root"
+runner=()
+[ "$(id -u)" -eq 0 ] || runner=(sudo)
+harness_uid="$(id -u)"
+harness_gid="$(id -g)"
+production_uid="$("${runner[@]}" id -u)"
+test_root_initial_metadata="$(stat -c '%u:%g:%a' "$test_root")"
+log_root_initial_metadata="$(stat -c '%u:%g:%a' "$log_root")"
+production_tmp_initial_metadata="$(stat -c '%u:%g:%a' "$backup_tmp")"
+production_lock_initial_metadata="$(stat -c '%u:%g:%a' "$production_lock")"
 
 cat >"$fake_bin/docker" <<'FAKE_DOCKER'
 #!/usr/bin/env bash
@@ -358,15 +374,15 @@ chmod 400 "$password"
 if [ "$(id -u)" -ne 0 ]; then
   sudo chown root:root "$config" "$password"
 fi
-rclone_calls="$test_root/rclone-calls"
-restic_repositories="$test_root/restic-repositories"
-restic_calls="$test_root/restic-calls"
+rclone_calls="$state_root/rclone-calls"
+restic_repositories="$state_root/restic-repositories"
+restic_calls="$state_root/restic-calls"
+docker_state="$state_root/docker-state"
+dump_mode="$state_root/dump-mode"
 touch "$rclone_calls" "$restic_repositories" "$restic_calls"
-root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$test_root/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$log_root/db-created" "FAKE_DB_DROPPED=$log_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories" "FAKE_RESTIC_CALLS=$restic_calls" "FAKE_COLLISION_PROOF=$log_root/collision-proof")
-root_env+=("FAKE_DOCKER_STATE=$test_root/docker-state")
-root_env+=("FAKE_DUMP_MODE=$log_root/dump-mode")
-runner=()
-[ "$(id -u)" -eq 0 ] || runner=(sudo)
+root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$production_lock/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$state_root/db-created" "FAKE_DB_DROPPED=$state_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories" "FAKE_RESTIC_CALLS=$restic_calls" "FAKE_COLLISION_PROOF=$state_root/collision-proof")
+root_env+=("FAKE_DOCKER_STATE=$docker_state")
+root_env+=("FAKE_DUMP_MODE=$dump_mode")
 pass_case harness-setup
 
 begin_case password-validator
@@ -467,6 +483,38 @@ assert_runner_file_absent() {
   fi
   assert_status 0 "$status" "$assertion"
 }
+remove_runner_or_root_fixture() {
+  local path="$1" assertion="$2" status=0
+  diagnostics_set_assertion "$assertion"
+  if "${runner[@]}" rm -f -- "$path"; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_status 0 "$status" "$assertion"
+  assert_runner_file_absent "$path" "$assertion-absent"
+}
+reset_docker_state() {
+  remove_runner_or_root_fixture "$docker_state" hostile-docker-state-reset
+}
+assert_harness_root_ownership() {
+  local suffix="$1" test_metadata log_metadata
+  diagnostics_set_assertion "harness-test-root-stat-$suffix"
+  test_metadata="$(stat -c '%u:%g:%a' "$test_root")"
+  diagnostics_set_assertion "harness-log-root-stat-$suffix"
+  log_metadata="$(stat -c '%u:%g:%a' "$log_root")"
+  assert_owner_mode "$harness_uid:$harness_gid:700" "$test_metadata" "harness-test-root-ownership-$suffix"
+  assert_owner_mode "$harness_uid:$harness_gid:700" "$log_metadata" "harness-log-root-ownership-$suffix"
+}
+assert_production_directory_ownership() {
+  local suffix="$1" tmp_metadata lock_metadata
+  diagnostics_set_assertion "production-tmp-stat-$suffix"
+  tmp_metadata="$("${runner[@]}" stat -c '%u:%g:%a' "$backup_tmp")"
+  diagnostics_set_assertion "production-lock-stat-$suffix"
+  lock_metadata="$("${runner[@]}" stat -c '%u:%g:%a' "$production_lock")"
+  assert_owner_mode '0:0:700' "$tmp_metadata" "production-tmp-ownership-$suffix"
+  assert_owner_mode '0:0:700' "$lock_metadata" "production-lock-ownership-$suffix"
+}
 capture_is_runner_readable() { [ -r "$log_root" ] && [ -x "$log_root" ] && [ -f "$1" ] && [ -r "$1" ]; }
 
 begin_case helper-entrypoints
@@ -500,7 +548,7 @@ assert_tmpfs_rejected() {
   local case_id="$1" case_name="$2" expected_message="$3"
   shift 3
   begin_case "$case_id"
-  "${runner[@]}" rm -f "$test_root/docker-state"
+  reset_docker_state
   local status=0
   if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$@" \
     "$root/scripts/backup/postgres-backup.sh" >"$log_root/tmpfs-$case_name.log" 2>&1; then
@@ -510,7 +558,7 @@ assert_tmpfs_rejected() {
   fi
   assert_nonzero_status "$status" tmpfs-rejection-status
   assert_contains "$log_root/tmpfs-$case_name.log" "$expected_message" tmpfs-rejection-diagnostic
-  assert_runner_file_absent "$test_root/docker-state" operation-not-created
+  assert_runner_file_absent "$docker_state" operation-not-created
   assert_backup_tmp_empty tmpfs-rejection-cleanup
   assert_not_contains "$log_root/tmpfs-$case_name.log" fixture-password secret-absent
   pass_case "$case_id"
@@ -658,8 +706,8 @@ assert_host_dump_rejected() {
   local case_name="$1" case_id status=0 path_before target_type=other target_mutated=no
   local fixed_tmp="$backup_tmp/fixed-$case_name"
   local target="$fixed_tmp/avelren-20000101T000000Z.dump"
-  local external_target="$test_root/host-target-$case_name"
-  local trace_file="$test_root/host-$case_name.strace"
+  local external_target="$fixture_root/host-target-$case_name"
+  local trace_file="$fixture_root/host-$case_name.strace"
   local backup_calls_before backup_calls_after sentinel_before='' sentinel_after=''
   case "$case_name" in
     symlink) case_id=host-existing-symlink ;;
@@ -670,42 +718,48 @@ assert_host_dump_rejected() {
     *) fail_case host-fixture-kind known unknown ;;
   esac
   begin_case "$case_id"
-  "${runner[@]}" mkdir -m 700 "$fixed_tmp"
+  assert_runner_file_absent "$fixed_tmp" host-fixture-fixed-tmp-absent
+  remove_runner_or_root_fixture "$external_target" host-fixture-external-target-reset
+  remove_runner_or_root_fixture "$trace_file" hostile-trace-reset
+  assert_command_succeeds host-fixture-fixed-tmp-create "${runner[@]}" mkdir -m 700 "$fixed_tmp"
   case "$case_name" in
     symlink)
-      "${runner[@]}" ln -s /dev/null "$target"
+      assert_command_succeeds host-fixture-symlink-create "${runner[@]}" ln -s /dev/null "$target"
       path_before=symlink
       target_type=character-device
       ;;
     symlink-regular)
-      printf '%s' sentinel-content >"$external_target"
+      # Positional expansion belongs to the isolated Bash fixture writer.
+      # shellcheck disable=SC2016
+      assert_command_succeeds host-fixture-sentinel-create bash -c 'printf %s sentinel-content >"$1"' _ "$external_target"
+      diagnostics_set_assertion host-fixture-sentinel-checksum-before
       sentinel_before="$(sha256sum "$external_target" | awk '{print $1}')"
-      "${runner[@]}" ln -s "$external_target" "$target"
+      assert_command_succeeds host-fixture-symlink-create "${runner[@]}" ln -s "$external_target" "$target"
       path_before=symlink
       target_type=regular
       ;;
     dangling-symlink)
-      "${runner[@]}" ln -s "$external_target" "$target"
+      assert_command_succeeds host-fixture-dangling-symlink-create "${runner[@]}" ln -s "$external_target" "$target"
       path_before=symlink
       target_type=missing
       ;;
     symlink-fifo)
-      mkfifo "$external_target"
-      "${runner[@]}" ln -s "$external_target" "$target"
+      assert_command_succeeds host-fixture-external-fifo-create mkfifo "$external_target"
+      assert_command_succeeds host-fixture-symlink-create "${runner[@]}" ln -s "$external_target" "$target"
       path_before=symlink
       target_type=fifo
       ;;
     fifo)
-      "${runner[@]}" mkfifo "$target"
+      assert_command_succeeds host-fixture-fifo-create "${runner[@]}" mkfifo "$target"
       path_before=fifo
       ;;
     directory)
-      "${runner[@]}" mkdir "$target"
+      assert_command_succeeds host-fixture-directory-create "${runner[@]}" mkdir "$target"
       path_before=directory
       ;;
     regular)
-      "${runner[@]}" touch "$target"
-      "${runner[@]}" chmod 600 "$target"
+      assert_command_succeeds host-fixture-regular-create "${runner[@]}" touch "$target"
+      assert_command_succeeds host-fixture-regular-mode "${runner[@]}" chmod 600 "$target"
       path_before=regular
       ;;
   esac
@@ -713,8 +767,12 @@ assert_host_dump_rejected() {
     assert_command_succeeds host-fixture-symlink "${runner[@]}" test -L "$target"
   fi
   backup_calls_before="$(grep -c '^backup$' "$restic_calls" || :)"
-  rm -f -- "$test_root/docker-state"
+  reset_docker_state
+  assert_command_succeeds hostile-trace-create "${runner[@]}" touch "$trace_file"
+  assert_command_succeeds hostile-trace-owner "${runner[@]}" chown root:root "$trace_file"
+  assert_command_succeeds hostile-trace-mode "${runner[@]}" chmod 600 "$trace_file"
   umask 0022
+  diagnostics_set_assertion existing-host-dump-production-command
   if "${runner[@]}" timeout --signal=TERM --kill-after=1s 5s strace -qq -f -e trace=openat,openat2 -o "$trace_file" \
       env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" \
       "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-$case_name.log" 2>&1; then
@@ -722,18 +780,19 @@ assert_host_dump_rejected() {
   else
     status=$?
   fi
-  "${runner[@]}" chown "$(id -u):$(id -g)" "$trace_file"
-  chmod 600 "$trace_file"
+  assert_command_succeeds hostile-trace-runner-owner "${runner[@]}" chown "$harness_uid:$harness_gid" "$trace_file"
+  assert_command_succeeds hostile-trace-runner-mode chmod 600 "$trace_file"
   assert_status 1 "$status" existing-host-dump-status
   assert_contains "$log_root/host-$case_name.log" 'Could not create secure host dump file.' existing-host-dump-diagnostic
   assert_not_contains "$log_root/host-$case_name.log" 'Host dump file permissions are unsafe.' existing-host-dump-branch
   assert_not_contains "$trace_file" "$target" existing-host-dump-not-opened
   backup_calls_after="$(grep -c '^backup$' "$restic_calls" || :)"
   [ "$backup_calls_before" = "$backup_calls_after" ] || fail_case existing-host-dump-restic accepted rejected
-  assert_file_absent "$test_root/docker-state" existing-host-dump-operation-not-created
+  assert_file_absent "$docker_state" existing-host-dump-operation-not-created
   assert_not_contains "$log_root/host-$case_name.log" fixture-password existing-host-dump-secret-absent
   case "$case_name" in
     symlink-regular)
+      diagnostics_set_assertion host-fixture-sentinel-checksum-after
       sentinel_after="$(sha256sum "$external_target" | awk '{print $1}')"
       [ "$sentinel_before" = "$sentinel_after" ] || target_mutated=yes
       ;;
@@ -743,21 +802,57 @@ assert_host_dump_rejected() {
   [ "$target_mutated" = no ] || fail_case existing-host-dump-target-mutation accepted rejected
   assert_runner_file_absent "$fixed_tmp" existing-host-dump-removed
   assert_backup_tmp_empty existing-host-dump-cleanup
-  rm -f -- "$external_target" "$trace_file"
+  remove_runner_or_root_fixture "$external_target" host-fixture-external-target-cleanup
+  remove_runner_or_root_fixture "$trace_file" hostile-trace-cleanup
   printf 'classification case=%s exit-status=1 marker-id=create-secure-host-dump-failed path-before=%s symlink-target=%s path-after=missing fd-opened-before-validation=no target-mutated=no cleanup-status=pass\n' \
     "$case_id" "$path_before" "$target_type"
   pass_case "$case_id"
 }
 
 begin_case host-dump-mode
-rm -f "$log_root/dump-mode"
+reset_docker_state
+remove_runner_or_root_fixture "$dump_mode" host-dump-mode-capture-reset
+diagnostics_set_assertion host-dump-mode-test-root-before-stat
+test_root_before_mode="$(stat -c '%u:%g:%a' "$test_root")"
+diagnostics_set_assertion host-dump-mode-log-root-before-stat
+log_root_before_mode="$(stat -c '%u:%g:%a' "$log_root")"
 umask 0022
 diagnostics_set_assertion backup-command-success
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
   "$root/scripts/backup/postgres-backup.sh" >"$log_root/explicit-dump-mode.log" 2>&1
-assert_owner_mode '0:0:600' "$("${runner[@]}" cat "$log_root/dump-mode")" host-dump-owner-mode
+assert_owner_mode '0:0:600' "$("${runner[@]}" cat "$dump_mode")" host-dump-owner-mode
 assert_backup_tmp_empty host-dump-mode-cleanup
 pass_case host-dump-mode
+
+begin_case harness-ownership-isolation
+assert_owner_mode "$harness_uid:$harness_gid:700" "$test_root_initial_metadata" harness-test-root-initial-ownership
+assert_owner_mode "$harness_uid:$harness_gid:700" "$log_root_initial_metadata" harness-log-root-initial-ownership
+assert_owner_mode "$harness_uid:$harness_gid:700" "$test_root_before_mode" harness-test-root-before-backup-ownership
+assert_owner_mode "$harness_uid:$harness_gid:700" "$log_root_before_mode" harness-log-root-before-backup-ownership
+assert_owner_mode '0' "$production_uid" production-invocation-euid
+assert_harness_root_ownership after-backup
+assert_production_directory_ownership after-backup
+diagnostics_set_assertion harness-docker-state-stat-after-backup
+docker_state_after_mode="$("${runner[@]}" stat -c '%u:%g:%a' "$docker_state")"
+assert_command_succeeds harness-state-marker-create touch "$state_root/runner-marker"
+assert_command_succeeds harness-state-marker-remove rm -f -- "$state_root/runner-marker"
+assert_file_absent "$state_root/runner-marker" harness-state-marker-removed
+reset_docker_state
+assert_command_succeeds harness-root-state-create "${runner[@]}" install -o root -g root -m 600 /dev/null "$docker_state"
+assert_owner_mode '0:0:600' "$("${runner[@]}" stat -c '%u:%g:%a' "$docker_state")" harness-root-state-ownership
+reset_docker_state
+diagnostics_set_assertion harness-test-root-stat-after-backup
+test_root_after_mode="$(stat -c '%u:%g:%a' "$test_root")"
+diagnostics_set_assertion harness-log-root-stat-after-backup
+log_root_after_mode="$(stat -c '%u:%g:%a' "$log_root")"
+diagnostics_set_assertion production-tmp-stat-report
+production_tmp_metadata="$("${runner[@]}" stat -c '%u:%g:%a' "$backup_tmp")"
+diagnostics_set_assertion production-lock-stat-report
+production_lock_metadata="$("${runner[@]}" stat -c '%u:%g:%a' "$production_lock")"
+printf 'ownership case=harness-ownership-isolation harness-euid=%s production-euid=%s test-root-before=%s test-root-after=%s log-root-before=%s log-root-after=%s production-tmp-before=%s production-tmp-after=%s production-lock-before=%s production-lock-after=%s docker-state-before=missing docker-state-after=%s state-reset=pass\n' \
+  "$harness_uid" "$production_uid" "$test_root_before_mode" "$test_root_after_mode" "$log_root_before_mode" "$log_root_after_mode" \
+  "$production_tmp_initial_metadata" "$production_tmp_metadata" "$production_lock_initial_metadata" "$production_lock_metadata" "$docker_state_after_mode"
+pass_case harness-ownership-isolation
 
 assert_host_dump_rejected symlink
 assert_host_dump_rejected symlink-regular
@@ -769,9 +864,10 @@ assert_host_dump_rejected regular
 
 begin_case host-dump-create-failure
 fixed_tmp="$backup_tmp/fixed-create-failure"
-"${runner[@]}" mkdir -m 700 "$fixed_tmp"
+assert_runner_file_absent "$fixed_tmp" host-dump-create-fixture-absent
+assert_command_succeeds host-dump-create-fixture-create "${runner[@]}" mkdir -m 700 "$fixed_tmp"
 backup_calls_before="$(grep -c '^backup$' "$restic_calls" || :)"
-rm -f -- "$test_root/docker-state"
+reset_docker_state
 if "${runner[@]}" timeout --signal=TERM --kill-after=1s 5s env "${root_env[@]}" \
     FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" \
     FAKE_DATE_VALUE='missing/20000101T000000Z' "$root/scripts/backup/postgres-backup.sh" \
@@ -785,7 +881,7 @@ assert_contains "$log_root/host-create-failure.log" 'Could not create secure hos
 assert_not_contains "$log_root/host-create-failure.log" 'Host dump file permissions are unsafe.' host-dump-create-failure-branch
 backup_calls_after="$(grep -c '^backup$' "$restic_calls" || :)"
 [ "$backup_calls_before" = "$backup_calls_after" ] || fail_case host-dump-create-failure-restic accepted rejected
-assert_file_absent "$test_root/docker-state" host-dump-create-failure-operation-not-created
+assert_file_absent "$docker_state" host-dump-create-failure-operation-not-created
 assert_not_contains "$log_root/host-create-failure.log" fixture-password host-dump-create-failure-secret-absent
 assert_runner_file_absent "$fixed_tmp" host-dump-create-failure-removed
 assert_backup_tmp_empty host-dump-create-failure-cleanup
@@ -816,7 +912,8 @@ for injected_failure in FAKE_TMPDIR_CHMOD_FAIL FAKE_DUMP_STAT_FAIL FAKE_DUMP_IDE
     *) fail_case injected-failure-kind known unknown ;;
   esac
   begin_case "$injected_case"
-  "${runner[@]}" mkdir -m 700 "$fixed_tmp"
+  assert_runner_file_absent "$fixed_tmp" injected-fixture-absent
+  assert_command_succeeds injected-fixture-create "${runner[@]}" mkdir -m 700 "$fixed_tmp"
   if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" "$injected_failure=1" \
       "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-$injected_failure.log" 2>&1; then
     status=0
@@ -868,11 +965,11 @@ assert_backup_tmp_empty stale-runtime-cleanup
 pass_case runtime-stale-state
 
 begin_case operation-collision-retry
-rm -f "$log_root/collision-proof"
+remove_runner_or_root_fixture "$state_root/collision-proof" collision-proof-reset
 diagnostics_set_assertion backup-command-success
 "${runner[@]}" env "${root_env[@]}" FAKE_COLLISION_ONCE=1 FAKE_REPOSITORY_BYTES="$below_warning" \
   "$root/scripts/backup/postgres-backup.sh" >"$log_root/collision.log" 2>&1
-assert_command_succeeds collision-state-preserved "${runner[@]}" grep -Fxq 'existing-operation-preserved' "$log_root/collision-proof"
+assert_command_succeeds collision-state-preserved "${runner[@]}" grep -Fxq 'existing-operation-preserved' "$state_root/collision-proof"
 assert_contains "$log_root/collision.log" 'PostgreSQL backup completed.' collision-backup-completed
 assert_backup_tmp_empty collision-cleanup
 pass_case operation-collision-retry
@@ -938,7 +1035,7 @@ fi
 assert_nonzero_status "$restore_status" restore-guard-status
 assert_contains "$restore_guard_log" 'Production database name must remain avelren.' restore-guard-diagnostic
 assert_not_contains_ci "$restore_guard_log" 'permission denied' restore-guard-reached
-assert_file_absent "$log_root/db-created" restore-database-not-created
+assert_file_absent "$state_root/db-created" restore-database-not-created
 pass_case restore-database-guard
 
 printf '%s\n' 'PostgreSQL backup failure-path and cleanup tests passed.'
