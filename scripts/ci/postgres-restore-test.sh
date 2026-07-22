@@ -796,6 +796,7 @@ stop_and_reap_child() {
       printf '%s\n' kill-escalated >>"$result_file"
     fi
   fi
+  # A single direct-parent wait is portable; dash may cache the status for a repeated wait.
   child_wait_status=0
   if wait "$pid" 2>/dev/null; then child_wait_status=0; else child_wait_status=$?; fi
   printf 'reaped-status:%s\n' "$child_wait_status" >>"$result_file"
@@ -875,7 +876,9 @@ run_create_client_handoff_case() {
   active_outer_pid="$creator_pid"
   case "$child_pid" in ''|*[!0-9]*) fail "$label (invalid child pid)" ;; esac
   case "$child_start" in ''|*[!0-9]*) fail "$label (invalid child start time)" ;; esac
-  child_identity="$(awk '{print $4 ":" $22}' "/proc/$child_pid/stat")"
+  if ! child_identity="$(awk '{print $4 ":" $22}' "/proc/$child_pid/stat" 2>/dev/null)"; then
+    fail "$label (child identity became unavailable before signal delivery)"
+  fi
   [ "$child_identity" = "$creator_pid:$child_start" ] || \
     fail "$label (child identity did not match the creator publication)"
   kill -s "$signal" "$creator_pid"
@@ -897,8 +900,9 @@ run_create_client_handoff_case() {
     fail "$label (direct-parent wait did not return a signal-derived status)"
   fi
   if [ -r "/proc/$child_pid/stat" ]; then
-    current_start="$(awk '{print $22}' "/proc/$child_pid/stat")"
-    [ "$current_start" != "$child_start" ] || fail "$label (original child identity survived cleanup)"
+    if current_start="$(awk '{print $22}' "/proc/$child_pid/stat" 2>/dev/null)"; then
+      [ "$current_start" != "$child_start" ] || fail "$label (original child identity survived cleanup)"
+    fi
   fi
   rm -f -- "$ready" "$pids" "$release" "$result" "$child_ready"
   pass "$label"
