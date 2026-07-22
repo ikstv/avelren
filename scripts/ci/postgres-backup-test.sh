@@ -18,6 +18,7 @@ else
   case_specs=(
     'static-contract|backup script contracts and retention policy'
     'runtime-nonroot-guard|non-root backup execution is rejected'
+    'diagnostic-validation|intentional failure and secret redaction diagnostics are validated'
     'runtime-root-runner|root runner dependency is available'
     'harness-setup|isolated fake command and fixture setup'
     'password-validator|Restic password file validation matrix'
@@ -37,6 +38,7 @@ else
     'tmpfs-effective-not-tmpfs|unsafe effective mount is rejected'
     'historical-nonempty|historical non-empty-only check remains proven unsafe'
     'host-redirection-classification|Bash host redirection behavior is classified'
+    'host-open-status-classification|Bash dynamic FD status capture and persistence are classified'
     'host-dump-mode|host dump is root-owned mode 0600'
     'harness-ownership-isolation|root-owned production runtime stays inside dedicated leaves'
     'host-existing-symlink|pre-existing dump symlink is rejected'
@@ -47,6 +49,7 @@ else
     'host-existing-directory|pre-existing dump directory is rejected'
     'host-existing-regular|pre-existing dump regular file is rejected'
     'host-dump-create-failure|host dump create failure is isolated'
+    'host-dump-not-directory-failure|host dump not-a-directory failure is isolated'
     'host-tmpdir-chmod-failure|temporary directory chmod failure is isolated'
     'host-dump-stat-failure|host dump stat failure is isolated'
     'host-dump-identity-mismatch|host dump path and FD identity mismatch is rejected'
@@ -108,6 +111,17 @@ for support_file in restic-password-file.sh restic-repository.sh postgres-tcp-du
   assert_command_succeeds "${support_id}-readable" test -r "$root/scripts/backup/$support_file"
 done
 assert_contains "$root/scripts/backup/postgres-backup.sh" '14 * 1024 * 1024 * 1024' hard-limit-contract
+# This is a literal source-code assertion.
+# shellcheck disable=SC2016
+assert_not_contains "$root/scripts/backup/postgres-backup.sh" 'if ! { :; } {dump_fd}>"$dump"' dump-open-negated-form-absent
+assert_contains "$root/scripts/backup/postgres-backup.sh" 'dump_fd=' dump-fd-initialized
+# This is a literal source-code assertion.
+# shellcheck disable=SC2016
+assert_contains "$root/scripts/backup/postgres-backup.sh" 'if { :; } {dump_fd}>"$dump"; then' dump-open-positive-condition
+assert_contains "$root/scripts/backup/postgres-backup.sh" 'dump_create_status=$?' dump-open-status-captured
+# This is a literal source-code assertion.
+# shellcheck disable=SC2016
+assert_contains "$root/scripts/backup/postgres-backup.sh" '[ "$dump_create_status" -ne 0 ] || [ -z "${dump_fd:-}" ]' dump-fd-guarded-after-open
 assert_contains "$root/scripts/backup/postgres-backup-prune.sh" 'keep-daily 7' daily-retention-contract
 assert_contains "$root/scripts/backup/postgres-backup-prune.sh" 'keep-weekly 4' weekly-retention-contract
 assert_contains "$root/scripts/backup/postgres-backup-prune.sh" 'keep-monthly 3' monthly-retention-contract
@@ -143,6 +157,11 @@ if [ "$(id -u)" -ne 0 ]; then
 else
   skip_case runtime-nonroot-guard already-root
 fi
+
+begin_case diagnostic-validation
+assert_command_succeeds diagnostic-intentional-failure-and-redaction \
+  diagnostics_self_test "$root/scripts/ci/postgres-backup-test.sh"
+pass_case diagnostic-validation
 
 if [ "$(id -u)" -ne 0 ] && { ! command -v sudo >/dev/null 2>&1 || ! sudo -n true >/dev/null 2>&1; }; then
   skip_case runtime-root-runner root-runner-unavailable
@@ -360,6 +379,9 @@ if [ "${FAKE_DUMP_IDENTITY_MISMATCH:-0}" = 1 ] && [[ "$target" == /proc/*/fd/* ]
   printf '%s\n' 'Injected host dump identity mismatch.' >&2
   printf '%s\n' '0:0:1:0:0:600'
   exit 0
+fi
+if [ -n "${FAKE_DUMP_FD_STAT_PROOF:-}" ] && [[ "$target" == /proc/*/fd/* ]]; then
+  printf '%s\n' reached >"$FAKE_DUMP_FD_STAT_PROOF"
 fi
 exec /usr/bin/stat "$@"
 FAKE_STAT
@@ -702,6 +724,125 @@ printf '%s\n' 'classification case=host-existing-symlink exit-status=0 marker-id
 printf '%s\n' 'classification case=host-redirection-classification absent-exit-status=0 absent-path-type=regular used-o-creat=yes used-o-excl=yes used-o-nofollow=no used-o-trunc=no cleanup-status=pass'
 pass_case host-redirection-classification
 
+begin_case host-open-status-classification
+open_probe_root="$fixture_root/open-status-probe"
+open_probe_failure="$open_probe_root/missing/file"
+open_probe_success="$open_probe_root/success.dump"
+negated_output="$log_root/open-status-negated.out"
+negated_stderr="$log_root/open-status-negated.stderr"
+positive_failure_output="$log_root/open-status-positive-failure.out"
+positive_failure_stderr="$log_root/open-status-positive-failure.stderr"
+positive_success_output="$log_root/open-status-positive-success.out"
+positive_success_stderr="$log_root/open-status-positive-success.stderr"
+assert_runner_file_absent "$open_probe_root" open-status-probe-absent
+assert_command_succeeds open-status-probe-create mkdir -m 700 "$open_probe_root"
+
+# The negated form is retained only as a regression proof of the historical
+# status-masking behavior. Positional expansion belongs to the isolated shell.
+# shellcheck disable=SC2016
+assert_command_succeeds negated-open-probe "${runner[@]}" bash -Eeuo pipefail -c '
+  path="$1"
+  fd=
+  marker=no
+  set -o noclobber
+  if ! { :; } {fd}>"$path"; then
+    marker=yes
+    set +o noclobber
+  fi
+  status=$?
+  assigned=no
+  [ -n "${fd:-}" ] && assigned=yes
+  created=no
+  [ -e "$path" ] && created=yes
+  restored=yes
+  shopt -qo noclobber && restored=no
+  printf "semantics form=negated status=%s marker-reached=%s fd-assigned=%s file-created=%s noclobber-restored=%s\n" \
+    "$status" "$marker" "$assigned" "$created" "$restored"
+' sh "$open_probe_failure" >"$negated_output" 2>"$negated_stderr"
+assert_contains_exact_line "$negated_output" \
+  'semantics form=negated status=0 marker-reached=no fd-assigned=no file-created=no noclobber-restored=no' \
+  negated-open-classification
+
+# Positive status capture keeps errexit from preempting the custom branch.
+# shellcheck disable=SC2016
+assert_command_succeeds positive-failure-open-probe "${runner[@]}" bash -Eeuo pipefail -c '
+  path="$1"
+  fd=
+  marker=no
+  status=0
+  set -o noclobber
+  if { :; } {fd}>"$path"; then
+    status=0
+  else
+    status=$?
+    marker=yes
+  fi
+  set +o noclobber
+  assigned=no
+  [ -n "${fd:-}" ] && assigned=yes
+  created=no
+  [ -e "$path" ] && created=yes
+  restored=yes
+  shopt -qo noclobber && restored=no
+  printf "semantics form=positive-failure status=%s marker-reached=%s fd-assigned=%s file-created=%s noclobber-restored=%s\n" \
+    "$status" "$marker" "$assigned" "$created" "$restored"
+' sh "$open_probe_failure" >"$positive_failure_output" 2>"$positive_failure_stderr"
+assert_contains_exact_line "$positive_failure_output" \
+  'semantics form=positive-failure status=1 marker-reached=yes fd-assigned=no file-created=no noclobber-restored=yes' \
+  positive-failure-open-classification
+
+# The successful probe verifies that the allocated FD remains in the same
+# root shell, matches its path, streams bytes, and closes explicitly.
+# shellcheck disable=SC2016
+assert_command_succeeds positive-success-open-probe "${runner[@]}" bash -Eeuo pipefail -c '
+  path="$1"
+  fd=
+  marker=no
+  status=0
+  umask 077
+  set -o noclobber
+  if { :; } {fd}>"$path"; then
+    status=0
+    marker=yes
+  else
+    status=$?
+  fi
+  set +o noclobber
+  assigned=no
+  [ -n "${fd:-}" ] && assigned=yes
+  created=no
+  [ -f "$path" ] && created=yes
+  restored=yes
+  shopt -qo noclobber && restored=no
+  persisted=no
+  [ -n "${fd:-}" ] && [ -e "/proc/$$/fd/$fd" ] && persisted=yes
+  identity=no
+  [ "$(stat -c "%d:%i" "$path")" = "$(stat -Lc "%d:%i" "/proc/$$/fd/$fd")" ] && identity=yes
+  owner_mode="$(stat -c "%u:%g:%a" "$path")"
+  printf %s stream-marker >&"$fd"
+  fd_number="$fd"
+  exec {fd}>&-
+  closed=no
+  [ ! -e "/proc/$$/fd/$fd_number" ] && closed=yes
+  streamed=no
+  grep -Fxq stream-marker "$path" && streamed=yes
+  printf "semantics form=positive-success status=%s marker-reached=%s fd-assigned=%s file-created=%s noclobber-restored=%s fd-persisted=%s identity-match=%s owner-mode=%s stream-through-fd=%s fd-closed=%s\n" \
+    "$status" "$marker" "$assigned" "$created" "$restored" "$persisted" "$identity" "$owner_mode" "$streamed" "$closed"
+' sh "$open_probe_success" >"$positive_success_output" 2>"$positive_success_stderr"
+assert_contains_exact_line "$positive_success_output" \
+  'semantics form=positive-success status=0 marker-reached=yes fd-assigned=yes file-created=yes noclobber-restored=yes fd-persisted=yes identity-match=yes owner-mode=0:0:600 stream-through-fd=yes fd-closed=yes' \
+  positive-success-open-classification
+assert_command_succeeds positive-success-stream-preserved "${runner[@]}" grep -Fxq stream-marker "$open_probe_success"
+
+remove_runner_or_root_fixture "$open_probe_success" open-status-success-fixture-cleanup
+for probe_capture in "$negated_output" "$negated_stderr" "$positive_failure_output" "$positive_failure_stderr" "$positive_success_output" "$positive_success_stderr"; do
+  remove_runner_or_root_fixture "$probe_capture" open-status-capture-cleanup
+done
+assert_command_succeeds open-status-probe-cleanup rmdir "$open_probe_root"
+assert_runner_file_absent "$open_probe_root" open-status-probe-removed
+printf '%s\n' 'classification case=host-open-status-classification negated-status=0 negated-marker=no positive-failure-status=1 positive-failure-marker=yes positive-success-status=0 positive-success-fd-persisted=yes positive-success-identity-match=yes positive-success-stream=yes positive-success-fd-closed=yes cleanup-status=pass'
+pass_case host-open-status-classification
+
 assert_host_dump_rejected() {
   local case_name="$1" case_id status=0 path_before target_type=other target_mutated=no
   local fixed_tmp="$backup_tmp/fixed-$case_name"
@@ -862,31 +1003,62 @@ assert_host_dump_rejected fifo
 assert_host_dump_rejected directory
 assert_host_dump_rejected regular
 
-begin_case host-dump-create-failure
-fixed_tmp="$backup_tmp/fixed-create-failure"
-assert_runner_file_absent "$fixed_tmp" host-dump-create-fixture-absent
-assert_command_succeeds host-dump-create-fixture-create "${runner[@]}" mkdir -m 700 "$fixed_tmp"
-backup_calls_before="$(grep -c '^backup$' "$restic_calls" || :)"
-reset_docker_state
-if "${runner[@]}" timeout --signal=TERM --kill-after=1s 5s env "${root_env[@]}" \
-    FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" \
-    FAKE_DATE_VALUE='missing/20000101T000000Z' "$root/scripts/backup/postgres-backup.sh" \
-    >"$log_root/host-create-failure.log" 2>&1; then
-  status=0
-else
-  status=$?
-fi
-assert_status 1 "$status" host-dump-create-failure-status
-assert_contains "$log_root/host-create-failure.log" 'Could not create secure host dump file.' host-dump-create-failure-marker
-assert_not_contains "$log_root/host-create-failure.log" 'Host dump file permissions are unsafe.' host-dump-create-failure-branch
-backup_calls_after="$(grep -c '^backup$' "$restic_calls" || :)"
-[ "$backup_calls_before" = "$backup_calls_after" ] || fail_case host-dump-create-failure-restic accepted rejected
-assert_file_absent "$docker_state" host-dump-create-failure-operation-not-created
-assert_not_contains "$log_root/host-create-failure.log" fixture-password host-dump-create-failure-secret-absent
-assert_runner_file_absent "$fixed_tmp" host-dump-create-failure-removed
-assert_backup_tmp_empty host-dump-create-failure-cleanup
-printf '%s\n' 'classification case=host-dump-create-failure exit-status=1 marker-id=create-secure-host-dump-failed path-before=missing symlink-target=missing path-after=missing fd-opened-before-validation=no target-mutated=no cleanup-status=pass'
-pass_case host-dump-create-failure
+assert_host_dump_create_failure() {
+  local case_id="$1" failure_kind="$2" fake_date fixed_tmp log_file fd_stat_proof
+  local status=0 backup_calls_before backup_calls_after marker_count
+  case "$failure_kind" in
+    missing-parent)
+      fake_date='missing/20000101T000000Z'
+      ;;
+    not-directory)
+      fake_date='not-a-directory/20000101T000000Z'
+      ;;
+    *) fail_case host-dump-create-failure-kind known unknown ;;
+  esac
+  fixed_tmp="$backup_tmp/fixed-$case_id"
+  log_file="$log_root/$case_id.log"
+  fd_stat_proof="$state_root/$case_id-fd-stat"
+  begin_case "$case_id"
+  assert_runner_file_absent "$fixed_tmp" "$case_id-fixture-absent"
+  assert_command_succeeds "$case_id-fixture-create" "${runner[@]}" mkdir -m 700 "$fixed_tmp"
+  if [ "$failure_kind" = not-directory ]; then
+    assert_command_succeeds "$case_id-intermediate-create" "${runner[@]}" \
+      install -o root -g root -m 600 /dev/null "$fixed_tmp/avelren-not-a-directory"
+    assert_command_succeeds "$case_id-intermediate-regular" "${runner[@]}" \
+      test -f "$fixed_tmp/avelren-not-a-directory"
+  fi
+  backup_calls_before="$(grep -c '^backup$' "$restic_calls" || :)"
+  reset_docker_state
+  remove_runner_or_root_fixture "$fd_stat_proof" "$case_id-fd-stat-reset"
+  diagnostics_set_assertion "$case_id-production-command"
+  if "${runner[@]}" timeout --signal=TERM --kill-after=1s 5s env "${root_env[@]}" \
+      FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" \
+      FAKE_DATE_VALUE="$fake_date" FAKE_DUMP_FD_STAT_PROOF="$fd_stat_proof" \
+      "$root/scripts/backup/postgres-backup.sh" >"$log_file" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_status 1 "$status" "$case_id-status"
+  assert_contains "$log_file" 'Could not create secure host dump file.' "$case_id-marker"
+  marker_count="$(grep -Fc 'Could not create secure host dump file.' "$log_file" || :)"
+  [ "$marker_count" = 1 ] || fail_case "$case_id-marker-count" one "$marker_count"
+  assert_not_contains "$log_file" 'Host dump file permissions are unsafe.' "$case_id-unsafe-branch"
+  assert_not_contains "$log_file" 'unbound variable' "$case_id-unbound-variable-absent"
+  assert_runner_file_absent "$fd_stat_proof" "$case_id-fd-not-used-after-failure"
+  backup_calls_after="$(grep -c '^backup$' "$restic_calls" || :)"
+  [ "$backup_calls_before" = "$backup_calls_after" ] || fail_case "$case_id-restic" not-started started
+  assert_file_absent "$docker_state" "$case_id-operation-not-created"
+  assert_not_contains "$log_file" fixture-password "$case_id-secret-absent"
+  assert_runner_file_absent "$fixed_tmp" "$case_id-fixture-removed"
+  assert_backup_tmp_empty "$case_id-cleanup"
+  printf 'classification case=%s failure-kind=%s exit-status=1 marker-id=create-secure-host-dump-failed marker-count=1 dump-fd-used-after-failure=no operation-created=no restic-started=no cleanup-status=pass\n' \
+    "$case_id" "$failure_kind"
+  pass_case "$case_id"
+}
+
+assert_host_dump_create_failure host-dump-create-failure missing-parent
+assert_host_dump_create_failure host-dump-not-directory-failure not-directory
 
 # The atomic dump mode comes from umask plus the single noclobber open; there
 # is deliberately no path-based dump chmod. Exercise tmpdir chmod, path stat,

@@ -239,13 +239,19 @@ if [ -e "$dump" ] || [ -L "$dump" ]; then
   printf '%s\n' 'Could not create secure host dump file.' >&2
   exit 1
 fi
+dump_fd=
+dump_create_status=0
 set -o noclobber
-if ! { :; } {dump_fd}>"$dump"; then
-  set +o noclobber
+if { :; } {dump_fd}>"$dump"; then
+  dump_create_status=0
+else
+  dump_create_status=$?
+fi
+set +o noclobber
+if [ "$dump_create_status" -ne 0 ] || [ -z "${dump_fd:-}" ]; then
   printf '%s\n' 'Could not create secure host dump file.' >&2
   exit 1
 fi
-set +o noclobber
 dump_path_identity="$(stat -c '%d:%i:%h:%u:%g:%a' "$dump")" || dump_path_identity=
 dump_fd_identity="$(stat -Lc '%d:%i:%h:%u:%g:%a' "/proc/$$/fd/$dump_fd")" || dump_fd_identity=
 if ! { [ -f "$dump" ] && [ ! -L "$dump" ] && [ -f "/proc/$$/fd/$dump_fd" ] && \
