@@ -68,6 +68,7 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+# shellcheck disable=SC2154 # ERR trap evaluates this shell snippet at runtime.
 trap 'status=$?; printf "Backup safety test failed at line %s.\n" "$LINENO" >&2; exit "$status"' ERR
 
 cat >"$fake_bin/docker" <<'FAKE_DOCKER'
