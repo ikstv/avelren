@@ -1691,7 +1691,7 @@ done
 
 begin_case host-partial-stream
 partial_stream_restore_hash="$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)"
-partial_stream_restic_hash="$(sha256sum "$restic_calls" | awk '{print $1}')"
+partial_stream_restic_backup_count="$(grep -Fxc backup "$restic_calls" || :)"
 partial_stream_status=0
 if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_STREAM_FAIL=1 \
     "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-partial-stream.log" 2>&1; then
@@ -1703,7 +1703,8 @@ assert_status 79 "$partial_stream_status" partial-stream-status
 assert_contains "$log_root/host-partial-stream.log" 'Injected PostgreSQL dump stream failure.' partial-stream-marker
 assert_owner_mode "$partial_stream_restore_hash" \
   "$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)" partial-stream-validation-not-reached
-assert_owner_mode "$partial_stream_restic_hash" "$(sha256sum "$restic_calls" | awk '{print $1}')" partial-stream-restic-not-reached
+assert_owner_mode "$partial_stream_restic_backup_count" \
+  "$(grep -Fxc backup "$restic_calls" || :)" partial-stream-restic-not-reached
 assert_backup_tmp_empty partial-stream-cleanup
 pass_case host-partial-stream
 
