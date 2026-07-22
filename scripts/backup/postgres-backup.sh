@@ -234,10 +234,10 @@ if ! exec {dump_fd}>"$dump"; then
   exit 1
 fi
 set +o noclobber
-[ -f "$dump" ] && [ ! -L "$dump" ] && [ "$(stat -c '%u:%g:%a' "$dump")" = '0:0:600' ] || {
+if ! { [ -f "$dump" ] && [ ! -L "$dump" ] && [ "$(stat -c '%u:%g:%a' "$dump")" = '0:0:600' ]; }; then
   printf '%s\n' 'Host dump file permissions are unsafe.' >&2
   exit 1
-}
+fi
 create_status=1
 for _ in 1 2 3 4 5; do
   operation_id="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
