@@ -1672,7 +1672,13 @@ run_setup_signal_case() {
   expected_phases+=(signal-observed)
   if [ "$phase" != before-detached ]; then
     expected_phases+=(cleanup-owned-entered)
-    [ "$cleanup_result" != success ] || expected_phases+=(cleanup-owned-success)
+    if [ "$cleanup_result" = success ]; then
+      expected_phases+=(cleanup-owned-success)
+    else
+      # A rejected or unavailable setup cleanup remains armed. terminate()
+      # attempts it once, then the EXIT cleanup retries it idempotently.
+      expected_phases+=(cleanup-owned-entered)
+    fi
   fi
   expected_phases+=(foreground-returned evidence-finalized assertion-started)
   assert_setup_phase_sequence "$label-phase-sequence" "${expected_phases[@]}"
