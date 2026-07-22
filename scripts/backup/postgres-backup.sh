@@ -225,16 +225,35 @@ RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$RESTIC_REPOSITORY_URL" restic
 
 tmpdir="$(mktemp -d -p "$tmp_root" avelren-pg-backup.XXXXXX)"
 chmod 700 "$tmpdir"
+if [ ! -d "$tmpdir" ] || [ -L "$tmpdir" ] || [ "$(stat -c '%u:%g:%a' "$tmpdir")" != '0:0:700' ]; then
+  printf '%s\n' 'Host dump temporary directory is unsafe.' >&2
+  exit 1
+fi
 dump="$tmpdir/avelren-$(date -u +%Y%m%dT%H%M%SZ).dump"
 umask 077
+# Bash noclobber is not O_NOFOLLOW: for an existing non-regular path it may
+# open a symlink target before rejecting the path/FD identity mismatch. The
+# directory above is freshly created and root-only; reject every existing
+# entry before asking noclobber for an atomic O_CREAT|O_EXCL absent-path open.
+if [ -e "$dump" ] || [ -L "$dump" ]; then
+  printf '%s\n' 'Could not create secure host dump file.' >&2
+  exit 1
+fi
 set -o noclobber
-if ! exec {dump_fd}>"$dump"; then
+if ! { :; } {dump_fd}>"$dump"; then
   set +o noclobber
   printf '%s\n' 'Could not create secure host dump file.' >&2
   exit 1
 fi
 set +o noclobber
-if ! { [ -f "$dump" ] && [ ! -L "$dump" ] && [ "$(stat -c '%u:%g:%a' "$dump")" = '0:0:600' ]; }; then
+dump_path_identity="$(stat -c '%d:%i:%h:%u:%g:%a' "$dump")" || dump_path_identity=
+dump_fd_identity="$(stat -Lc '%d:%i:%h:%u:%g:%a' "/proc/$$/fd/$dump_fd")" || dump_fd_identity=
+if ! { [ -f "$dump" ] && [ ! -L "$dump" ] && [ -f "/proc/$$/fd/$dump_fd" ] && \
+    [ -n "$dump_path_identity" ] && [ "$dump_path_identity" = "$dump_fd_identity" ]; }; then
+  printf '%s\n' 'Host dump file permissions are unsafe.' >&2
+  exit 1
+fi
+if ! [[ "$dump_path_identity" =~ ^[0-9]+:[0-9]+:1:0:0:600$ ]]; then
   printf '%s\n' 'Host dump file permissions are unsafe.' >&2
   exit 1
 fi

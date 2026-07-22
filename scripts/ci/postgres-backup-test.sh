@@ -36,13 +36,19 @@ else
     'tmpfs-malformed-boolean|malformed tmpfs boolean is rejected'
     'tmpfs-effective-not-tmpfs|unsafe effective mount is rejected'
     'historical-nonempty|historical non-empty-only check remains proven unsafe'
+    'host-redirection-classification|Bash host redirection behavior is classified'
     'host-dump-mode|host dump is root-owned mode 0600'
     'host-existing-symlink|pre-existing dump symlink is rejected'
+    'host-existing-symlink-regular|pre-existing symlink to a regular file is rejected'
+    'host-existing-dangling-symlink|pre-existing dangling symlink is rejected'
+    'host-existing-symlink-fifo|pre-existing symlink to a FIFO is rejected without blocking'
     'host-existing-fifo|pre-existing dump FIFO is rejected'
     'host-existing-directory|pre-existing dump directory is rejected'
     'host-existing-regular|pre-existing dump regular file is rejected'
+    'host-dump-create-failure|host dump create failure is isolated'
     'host-tmpdir-chmod-failure|temporary directory chmod failure is isolated'
     'host-dump-stat-failure|host dump stat failure is isolated'
+    'host-dump-identity-mismatch|host dump path and FD identity mismatch is rejected'
     'host-partial-stream|partial dump stream is cleaned up'
     'repository-below-warning|repository below warning threshold succeeds'
     'runtime-stale-state|stale runtime state is rejected'
@@ -277,6 +283,7 @@ cat >"$fake_bin/restic" <<'FAKE_RESTIC'
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "${RESTIC_REPOSITORY:-missing}" >>"$FAKE_RESTIC_REPOSITORIES"
+printf '%s\n' "${1:-missing}" >>"$FAKE_RESTIC_CALLS"
 case "${1:-}" in
   snapshots) exit 0 ;;
   backup)
@@ -301,7 +308,7 @@ cat >"$fake_bin/date" <<'FAKE_DATE'
 #!/usr/bin/env bash
 set -eu
 if [ "$*" = '-u +%Y%m%dT%H%M%SZ' ]; then
-  printf '%s\n' 20000101T000000Z
+  printf '%s\n' "${FAKE_DATE_VALUE:-20000101T000000Z}"
 else
   exec /bin/date "$@"
 fi
@@ -333,6 +340,11 @@ if [ "${FAKE_DUMP_STAT_FAIL:-0}" = 1 ] && [[ "$target" == *avelren-20000101T0000
   printf '%s\n' 'Injected host dump stat failure.' >&2
   exit 72
 fi
+if [ "${FAKE_DUMP_IDENTITY_MISMATCH:-0}" = 1 ] && [[ "$target" == /proc/*/fd/* ]]; then
+  printf '%s\n' 'Injected host dump identity mismatch.' >&2
+  printf '%s\n' '0:0:1:0:0:600'
+  exit 0
+fi
 exec /usr/bin/stat "$@"
 FAKE_STAT
 chmod 755 "$fake_bin"/*
@@ -348,8 +360,9 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 rclone_calls="$test_root/rclone-calls"
 restic_repositories="$test_root/restic-repositories"
-touch "$rclone_calls" "$restic_repositories"
-root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$test_root/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$log_root/db-created" "FAKE_DB_DROPPED=$log_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories" "FAKE_COLLISION_PROOF=$log_root/collision-proof")
+restic_calls="$test_root/restic-calls"
+touch "$rclone_calls" "$restic_repositories" "$restic_calls"
+root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$test_root/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$log_root/db-created" "FAKE_DB_DROPPED=$log_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories" "FAKE_RESTIC_CALLS=$restic_calls" "FAKE_COLLISION_PROOF=$log_root/collision-proof")
 root_env+=("FAKE_DOCKER_STATE=$test_root/docker-state")
 root_env+=("FAKE_DUMP_MODE=$log_root/dump-mode")
 runner=()
@@ -584,30 +597,196 @@ assert_contains "$log_root/legacy-nonempty-only.log" 'PostgreSQL backup complete
 assert_backup_tmp_empty legacy-backup-cleanup
 pass_case historical-nonempty
 
+run_noclobber_probe() {
+  local target="$1" stderr_file="$2" status=0
+  # Expansion belongs to the isolated probe shell.
+  # shellcheck disable=SC2016
+  if timeout --signal=TERM --kill-after=1s 2s bash -c \
+      'set -o noclobber; exec {probe_fd}>"$1"' sh "$target" >/dev/null 2>"$stderr_file"; then
+    status=0
+  else
+    status=$?
+  fi
+  printf '%s' "$status"
+}
+
+trace_open_line() {
+  local target="$1" trace_file="$2" stderr_file="$3" status=0
+  # Expansion belongs to the isolated probe shell.
+  # shellcheck disable=SC2016
+  if timeout --signal=TERM --kill-after=1s 2s strace -qq -f -e trace=openat,openat2 -o "$trace_file" \
+      bash -c 'set -o noclobber; exec {probe_fd}>"$1"' sh "$target" >/dev/null 2>"$stderr_file"; then
+    status=0
+  else
+    status=$?
+  fi
+  printf '%s\n' "$status"
+  grep -E 'openat2?\([^,]+, ".*probe-(symlink|absent)"' "$trace_file" | tail -n 1
+}
+
+begin_case host-redirection-classification
+probe_root="$test_root/redirection-probe"
+probe_stderr="$log_root/redirection-probe.stderr"
+probe_trace="$test_root/redirection-probe.strace"
+mkdir -m 700 "$probe_root"
+assert_command_succeeds strace-available command -v strace
+
+ln -s /dev/null "$probe_root/probe-symlink"
+mapfile -t trace_result < <(trace_open_line "$probe_root/probe-symlink" "$probe_trace" "$probe_stderr")
+assert_status 1 "${trace_result[0]}" symlink-dev-null-status
+assert_nonempty "${trace_result[1]:-}" symlink-dev-null-openat
+assert_contains "$probe_trace" 'O_CREAT' symlink-used-o-creat
+assert_not_contains "$probe_trace" 'O_EXCL' symlink-used-o-excl
+assert_not_contains "$probe_trace" 'O_NOFOLLOW' symlink-used-o-nofollow
+assert_not_contains "$probe_trace" 'O_TRUNC' symlink-used-o-trunc
+if [[ "${trace_result[1]}" =~ =[[:space:]]+[0-9]+([[:space:]]|$) ]]; then
+  target_opened=yes
+else
+  target_opened=no
+fi
+[ "$target_opened" = yes ] || fail_case symlink-target-opened accepted rejected
+printf '%s\n' 'classification case=host-existing-symlink exit-status=1 marker-id=fd-opened-before-path-rejection path-before=symlink symlink-target=character-device path-after=symlink fd-opened-before-validation=yes target-mutated=no cleanup-status=pending'
+rm -f -- "$probe_root/probe-symlink" "$probe_trace" "$probe_stderr"
+
+printf '%s' sentinel-content >"$probe_root/sentinel"
+sentinel_before="$(sha256sum "$probe_root/sentinel" | awk '{print $1}')"
+ln -s "$probe_root/sentinel" "$probe_root/probe-symlink"
+probe_status="$(run_noclobber_probe "$probe_root/probe-symlink" "$probe_stderr")"
+assert_status 1 "$probe_status" symlink-regular-status
+sentinel_after="$(sha256sum "$probe_root/sentinel" | awk '{print $1}')"
+[ "$sentinel_before" = "$sentinel_after" ] || fail_case symlink-regular-sentinel accepted rejected
+rm -f -- "$probe_root/probe-symlink" "$probe_root/sentinel" "$probe_stderr"
+
+ln -s "$probe_root/dangling-target" "$probe_root/probe-symlink"
+probe_status="$(run_noclobber_probe "$probe_root/probe-symlink" "$probe_stderr")"
+assert_status 1 "$probe_status" dangling-symlink-status
+assert_file_exists "$probe_root/dangling-target" dangling-symlink-target-created
+rm -f -- "$probe_root/probe-symlink" "$probe_root/dangling-target" "$probe_stderr"
+
+mkfifo "$probe_root/probe-fifo"
+ln -s "$probe_root/probe-fifo" "$probe_root/probe-symlink"
+probe_status="$(run_noclobber_probe "$probe_root/probe-symlink" "$probe_stderr")"
+assert_status 124 "$probe_status" symlink-fifo-bounded-timeout
+rm -f -- "$probe_root/probe-symlink" "$probe_root/probe-fifo" "$probe_stderr"
+
+printf '%s' regular-content >"$probe_root/probe-regular"
+regular_before="$(sha256sum "$probe_root/probe-regular" | awk '{print $1}')"
+probe_status="$(run_noclobber_probe "$probe_root/probe-regular" "$probe_stderr")"
+assert_status 1 "$probe_status" existing-regular-status
+regular_after="$(sha256sum "$probe_root/probe-regular" | awk '{print $1}')"
+[ "$regular_before" = "$regular_after" ] || fail_case existing-regular-sentinel accepted rejected
+rm -f -- "$probe_root/probe-regular" "$probe_stderr"
+
+mkdir "$probe_root/probe-directory"
+probe_status="$(run_noclobber_probe "$probe_root/probe-directory" "$probe_stderr")"
+assert_status 1 "$probe_status" existing-directory-status
+rmdir "$probe_root/probe-directory"
+rm -f -- "$probe_stderr"
+
+mapfile -t trace_result < <(trace_open_line "$probe_root/probe-absent" "$probe_trace" "$probe_stderr")
+assert_status 0 "${trace_result[0]}" absent-path-status
+assert_nonempty "${trace_result[1]:-}" absent-path-openat
+assert_contains "$probe_trace" 'O_CREAT' absent-path-used-o-creat
+assert_contains "$probe_trace" 'O_EXCL' absent-path-used-o-excl
+assert_not_contains "$probe_trace" 'O_NOFOLLOW' absent-path-used-o-nofollow
+assert_not_contains "$probe_trace" 'O_TRUNC' absent-path-used-o-trunc
+rm -f -- "$probe_root/probe-absent" "$probe_trace" "$probe_stderr"
+rmdir "$probe_root"
+printf '%s\n' 'classification case=host-redirection-classification used-o-creat=yes used-o-excl-existing-symlink=no used-o-excl-absent-path=yes used-o-nofollow=no used-o-trunc=no followed-symlink=yes target-opened=yes cleanup-status=pass'
+pass_case host-redirection-classification
+
 assert_host_dump_rejected() {
-  local case_name="$1" case_id="host-existing-$1" status=0
+  local case_name="$1" case_id status=0 path_before target_type=other target_mutated=no
   local fixed_tmp="$backup_tmp/fixed-$case_name"
   local target="$fixed_tmp/avelren-20000101T000000Z.dump"
+  local external_target="$test_root/host-target-$case_name"
+  local trace_file="$test_root/host-$case_name.strace"
+  local backup_calls_before backup_calls_after sentinel_before='' sentinel_after=''
+  case "$case_name" in
+    symlink) case_id=host-existing-symlink ;;
+    symlink-regular) case_id=host-existing-symlink-regular ;;
+    dangling-symlink) case_id=host-existing-dangling-symlink ;;
+    symlink-fifo) case_id=host-existing-symlink-fifo ;;
+    fifo|directory|regular) case_id="host-existing-$case_name" ;;
+    *) fail_case host-fixture-kind known unknown ;;
+  esac
   begin_case "$case_id"
   "${runner[@]}" mkdir -m 700 "$fixed_tmp"
   case "$case_name" in
-    symlink) "${runner[@]}" ln -s /dev/null "$target" ;;
-    fifo) "${runner[@]}" mkfifo "$target" ;;
-    directory) "${runner[@]}" mkdir "$target" ;;
-    regular) "${runner[@]}" touch "$target"; "${runner[@]}" chmod 600 "$target" ;;
-    *) fail_case host-fixture-kind known unknown ;;
+    symlink)
+      "${runner[@]}" ln -s /dev/null "$target"
+      path_before=symlink
+      target_type=character-device
+      ;;
+    symlink-regular)
+      printf '%s' sentinel-content >"$external_target"
+      sentinel_before="$(sha256sum "$external_target" | awk '{print $1}')"
+      "${runner[@]}" ln -s "$external_target" "$target"
+      path_before=symlink
+      target_type=regular
+      ;;
+    dangling-symlink)
+      "${runner[@]}" ln -s "$external_target" "$target"
+      path_before=symlink
+      target_type=missing
+      ;;
+    symlink-fifo)
+      mkfifo "$external_target"
+      "${runner[@]}" ln -s "$external_target" "$target"
+      path_before=symlink
+      target_type=fifo
+      ;;
+    fifo)
+      "${runner[@]}" mkfifo "$target"
+      path_before=fifo
+      ;;
+    directory)
+      "${runner[@]}" mkdir "$target"
+      path_before=directory
+      ;;
+    regular)
+      "${runner[@]}" touch "$target"
+      "${runner[@]}" chmod 600 "$target"
+      path_before=regular
+      ;;
   esac
+  if [ "$path_before" = symlink ]; then
+    assert_command_succeeds host-fixture-symlink "${runner[@]}" test -L "$target"
+  fi
+  backup_calls_before="$(grep -c '^backup$' "$restic_calls" || :)"
+  rm -f -- "$test_root/docker-state"
   umask 0022
-  if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" \
+  if "${runner[@]}" timeout --signal=TERM --kill-after=1s 5s strace -qq -f -e trace=openat,openat2 -o "$trace_file" \
+      env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" \
       "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-$case_name.log" 2>&1; then
     status=0
   else
     status=$?
   fi
-  assert_nonzero_status "$status" existing-host-dump-status
+  "${runner[@]}" chown "$(id -u):$(id -g)" "$trace_file"
+  chmod 600 "$trace_file"
+  assert_status 1 "$status" existing-host-dump-status
   assert_contains "$log_root/host-$case_name.log" 'Could not create secure host dump file.' existing-host-dump-diagnostic
+  assert_not_contains "$log_root/host-$case_name.log" 'Host dump file permissions are unsafe.' existing-host-dump-branch
+  assert_not_contains "$trace_file" "$target" existing-host-dump-not-opened
+  backup_calls_after="$(grep -c '^backup$' "$restic_calls" || :)"
+  [ "$backup_calls_before" = "$backup_calls_after" ] || fail_case existing-host-dump-restic accepted rejected
+  assert_file_absent "$test_root/docker-state" existing-host-dump-operation-not-created
+  assert_not_contains "$log_root/host-$case_name.log" fixture-password existing-host-dump-secret-absent
+  case "$case_name" in
+    symlink-regular)
+      sentinel_after="$(sha256sum "$external_target" | awk '{print $1}')"
+      [ "$sentinel_before" = "$sentinel_after" ] || target_mutated=yes
+      ;;
+    dangling-symlink) [ ! -e "$external_target" ] || target_mutated=yes ;;
+    symlink-fifo) [ -p "$external_target" ] || target_mutated=yes ;;
+  esac
+  [ "$target_mutated" = no ] || fail_case existing-host-dump-target-mutation accepted rejected
   assert_runner_file_absent "$fixed_tmp" existing-host-dump-removed
   assert_backup_tmp_empty existing-host-dump-cleanup
+  rm -f -- "$external_target" "$trace_file"
+  printf 'classification case=%s exit-status=1 marker-id=create-secure-host-dump-failed path-before=%s symlink-target=%s path-after=missing fd-opened-before-validation=no target-mutated=no cleanup-status=pass\n' \
+    "$case_id" "$path_before" "$target_type"
   pass_case "$case_id"
 }
 
@@ -622,13 +801,42 @@ assert_backup_tmp_empty host-dump-mode-cleanup
 pass_case host-dump-mode
 
 assert_host_dump_rejected symlink
+assert_host_dump_rejected symlink-regular
+assert_host_dump_rejected dangling-symlink
+assert_host_dump_rejected symlink-fifo
 assert_host_dump_rejected fifo
 assert_host_dump_rejected directory
 assert_host_dump_rejected regular
+
+begin_case host-dump-create-failure
+fixed_tmp="$backup_tmp/fixed-create-failure"
+"${runner[@]}" mkdir -m 700 "$fixed_tmp"
+backup_calls_before="$(grep -c '^backup$' "$restic_calls" || :)"
+rm -f -- "$test_root/docker-state"
+if "${runner[@]}" timeout --signal=TERM --kill-after=1s 5s env "${root_env[@]}" \
+    FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" \
+    FAKE_DATE_VALUE='missing/20000101T000000Z' "$root/scripts/backup/postgres-backup.sh" \
+    >"$log_root/host-create-failure.log" 2>&1; then
+  status=0
+else
+  status=$?
+fi
+assert_status 1 "$status" host-dump-create-failure-status
+assert_contains "$log_root/host-create-failure.log" 'Could not create secure host dump file.' host-dump-create-failure-marker
+assert_not_contains "$log_root/host-create-failure.log" 'Host dump file permissions are unsafe.' host-dump-create-failure-branch
+backup_calls_after="$(grep -c '^backup$' "$restic_calls" || :)"
+[ "$backup_calls_before" = "$backup_calls_after" ] || fail_case host-dump-create-failure-restic accepted rejected
+assert_file_absent "$test_root/docker-state" host-dump-create-failure-operation-not-created
+assert_not_contains "$log_root/host-create-failure.log" fixture-password host-dump-create-failure-secret-absent
+assert_runner_file_absent "$fixed_tmp" host-dump-create-failure-removed
+assert_backup_tmp_empty host-dump-create-failure-cleanup
+printf '%s\n' 'classification case=host-dump-create-failure exit-status=1 marker-id=create-secure-host-dump-failed path-before=missing symlink-target=missing path-after=missing fd-opened-before-validation=no target-mutated=no cleanup-status=pass'
+pass_case host-dump-create-failure
+
 # The atomic dump mode comes from umask plus the single noclobber open; there
-# is deliberately no path-based dump chmod. Exercise the actual tmpdir chmod
-# failure and the dump stat failure, and prove that each injector was reached.
-for injected_failure in FAKE_TMPDIR_CHMOD_FAIL FAKE_DUMP_STAT_FAIL; do
+# is deliberately no path-based dump chmod. Exercise tmpdir chmod, path stat,
+# and path/FD identity failures, and prove that each injector was reached.
+for injected_failure in FAKE_TMPDIR_CHMOD_FAIL FAKE_DUMP_STAT_FAIL FAKE_DUMP_IDENTITY_MISMATCH; do
   fixed_tmp="$backup_tmp/fixed-$injected_failure"
   case "$injected_failure" in
     FAKE_TMPDIR_CHMOD_FAIL)
@@ -640,6 +848,11 @@ for injected_failure in FAKE_TMPDIR_CHMOD_FAIL FAKE_DUMP_STAT_FAIL; do
       injected_case=host-dump-stat-failure
       expected_status=1
       expected_marker='Injected host dump stat failure.'
+      ;;
+    FAKE_DUMP_IDENTITY_MISMATCH)
+      injected_case=host-dump-identity-mismatch
+      expected_status=1
+      expected_marker='Injected host dump identity mismatch.'
       ;;
     *) fail_case injected-failure-kind known unknown ;;
   esac
@@ -653,7 +866,7 @@ for injected_failure in FAKE_TMPDIR_CHMOD_FAIL FAKE_DUMP_STAT_FAIL; do
   fi
   assert_status "$expected_status" "$status" injected-failure-status
   assert_contains "$log_root/host-$injected_failure.log" "$expected_marker" injected-failure-marker
-  if [ "$injected_failure" = FAKE_DUMP_STAT_FAIL ]; then
+  if [ "$injected_failure" = FAKE_DUMP_STAT_FAIL ] || [ "$injected_failure" = FAKE_DUMP_IDENTITY_MISMATCH ]; then
     assert_contains "$log_root/host-$injected_failure.log" 'Host dump file permissions are unsafe.' dump-stat-diagnostic
   fi
   assert_runner_file_absent "$fixed_tmp" injected-fixture-removed
