@@ -338,10 +338,10 @@ while read -r candidate; do
   fi
 done < <(git -C "$root" rev-list HEAD)
 [ -n "$legacy_ref" ]
-git -C "$root" show "$legacy_ref:scripts/backup/postgres-backup.sh" >"$legacy_backup"
-cp "$root/scripts/backup/restic-password-file.sh" "$root/scripts/backup/restic-repository.sh" \
+git -C "$root" show "$legacy_ref:scripts/backup/postgres-backup.sh" | "${runner[@]}" tee "$legacy_backup" >/dev/null
+"${runner[@]}" cp "$root/scripts/backup/restic-password-file.sh" "$root/scripts/backup/restic-repository.sh" \
   "$root/scripts/backup/postgres-tcp-dump.sh" "$root/scripts/backup/postgres-backup-control.sh" "$test_root/"
-chmod 700 "$legacy_backup"
+"${runner[@]}" chmod 700 "$legacy_backup"
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
   FAKE_TMPFS_OPTIONS='rw,nosuid,nodev,mode=0700,uid=0,gid=0' \
   "$legacy_backup" >"$log_root/legacy-nonempty-only.log" 2>&1
