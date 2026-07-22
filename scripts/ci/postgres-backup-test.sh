@@ -1732,7 +1732,8 @@ else
 fi
 assert_status 124 "$transfer_timeout_status" transfer-timeout-status
 assert_contains "$log_root/host-transfer-timeout.log" 'PostgreSQL dump transfer failed.' transfer-timeout-diagnostic
-assert_contains_exact_line "$transfer_terminated" terminated transfer-process-terminated
+assert_command_succeeds transfer-process-terminated \
+  "${runner[@]}" grep -Fxq -- terminated "$transfer_terminated"
 assert_owner_mode "$transfer_timeout_restore_hash" \
   "$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)" transfer-timeout-validation-not-reached
 assert_owner_mode "$transfer_timeout_restic_hash" "$(sha256sum "$restic_calls" | awk '{print $1}')" transfer-timeout-restic-not-reached
