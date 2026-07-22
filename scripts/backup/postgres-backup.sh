@@ -23,6 +23,7 @@ pg_database="${AVELREN_PG_DATABASE:-avelren}"
 pg_user="${AVELREN_PG_USER:-avelren}"
 heartbeat_timeout="${AVELREN_BACKUP_HEARTBEAT_TIMEOUT:-30}"
 docker_command_timeout="${AVELREN_BACKUP_DOCKER_TIMEOUT:-5}"
+transfer_timeout="${AVELREN_BACKUP_TRANSFER_TIMEOUT:-900}"
 termination_timeout="${AVELREN_BACKUP_TERMINATION_TIMEOUT:-10}"
 postgres_dump_helper="$script_dir/postgres-tcp-dump.sh"
 postgres_control_helper="$script_dir/postgres-backup-control.sh"
@@ -38,9 +39,10 @@ operation_setup_token=
 operation_cleanup_warning_emitted=0
 tmpdir=
 
-case "$heartbeat_timeout:$docker_command_timeout:$termination_timeout" in *[!0-9:]*) exit 1 ;; esac
+case "$heartbeat_timeout:$docker_command_timeout:$transfer_timeout:$termination_timeout" in *[!0-9:]*) exit 1 ;; esac
 [ "$heartbeat_timeout" -ge 5 ] && [ "$heartbeat_timeout" -le 300 ] || exit 1
 [ "$docker_command_timeout" -ge 1 ] && [ "$docker_command_timeout" -le 30 ] || exit 1
+[ "$transfer_timeout" -ge 30 ] && [ "$transfer_timeout" -le 7200 ] || exit 1
 [ "$termination_timeout" -ge 2 ] && [ "$termination_timeout" -le 60 ] || exit 1
 
 control() {
@@ -50,6 +52,10 @@ control() {
 
 docker_timed() {
   timeout --signal=KILL "$docker_command_timeout" docker "$@"
+}
+
+docker_transfer_timed() {
+  timeout --signal=TERM --kill-after="${termination_timeout}s" "$transfer_timeout" docker "$@"
 }
 
 declared_tmpfs_is_secure() {
@@ -372,12 +378,17 @@ fi
 # Stream only the validated dump bytes to the root-only host temporary file.
 # Expansion belongs to the isolated container shell.
 # shellcheck disable=SC2016
-docker_timed exec --user 0 "$container" sh -eu -c '
+transfer_status=0
+docker_transfer_timed exec --user 0 "$container" sh -eu -c '
   file="$1"
   [ -f "$file" ] && [ ! -L "$file" ] && [ -s "$file" ]
   [ "$(stat -c "%u:%g:%a" "$file")" = "0:0:600" ]
   cat -- "$file"
-' sh "$control_dir/postgres.dump" >&"$dump_fd"
+' sh "$control_dir/postgres.dump" >&"$dump_fd" || transfer_status=$?
+if [ "$transfer_status" -ne 0 ]; then
+  printf '%s\n' 'PostgreSQL dump transfer failed.' >&2
+  exit "$transfer_status"
+fi
 exec {dump_fd}>&-
 control cleanup "$control_dir" "$operation_id" >/dev/null
 operation_active=0

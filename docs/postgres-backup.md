@@ -20,6 +20,8 @@ Host locks мають окремий runtime namespace `/run/avelren` (`root:roo
 
 Custom dump створюється з `--no-owner --no-acl`, копіюється на host лише після status `0`, перевіряється `pg_restore --list`, шифрується Restic і після цього видаляється з root-only temporary directory. Host dump створюється атомарно як root-owned regular file з exact mode `0600` незалежно від umask викликача; наявний symlink, FIFO, directory або regular file відхиляється. Backup не виконує SQL mutation. Prune є окремою командою: 7 daily, 4 weekly, 3 monthly; warning — 12 GiB, hard stop нових backup-ів — 14 GiB.
 
+`AVELREN_BACKUP_TRANSFER_TIMEOUT` окремо обмежує host-side streaming dump: default `900` секунд, допустимий діапазон `30..7200`. `AVELREN_BACKUP_DOCKER_TIMEOUT` лишається лише для коротких Docker/control commands.
+
 Restore drill вибирає `latest` лише серед snapshot-ів із тим самим PostgreSQL tag, приймає рівно один regular dump із production naming/ownership contract і відкриває його один раз через перевірений FD. `createdb`, streaming `pg_restore`, validation і `dropdb` виконуються в одному immutable PostgreSQL container через explicit TCP `127.0.0.1:5432` та root-only `PGPASSFILE` у перевіреному tmpfs; host libpq environment і host `pg_restore` не використовуються. Temporary database має випадкову identity, відмінну від `avelren`; interruption cleanup спочатку зупиняє token-scoped PostgreSQL backend створення, а потім звіряє operation token, cluster identity та database OID. Restore payload видаляється лише після повторної перевірки token та device/inode; mismatch або cleanup failure зберігає state з redacted diagnostic. Root-equivalent host/container attacker або PostgreSQL superuser поза локальною threat model цього drill.
 
 ### Точна процедура install/upgrade
@@ -180,6 +182,8 @@ On SIGINT/SIGTERM, the controller sends TERM only to the validated operation sup
 When the Docker daemon is unavailable, the controller neither guesses a PID nor removes unverified state. A live watchdog completes cancellation after daemon recovery; container restart/recreation guarantees tmpfs cleanup. A paused/frozen container cannot run traps or the watchdog: the credential remains root-only in RAM-backed tmpfs until unpause and cleanup or restart/recreation. Do not restart the timer until the prior state is gone and PostgreSQL is healthy.
 
 The custom dump uses `--no-owner --no-acl`, is copied to the host only after status `0`, is checked with `pg_restore --list`, encrypted with Restic, and removed from its root-only temporary directory. The host dump is atomically created as a root-owned regular file with exact mode `0600`, independent of caller umask; an existing symlink, FIFO, directory, or regular file is rejected. Backup executes no mutating SQL. Prune is separate: 7 daily, 4 weekly, and 3 monthly snapshots; warning at 12 GiB and hard stop for new backups at 14 GiB.
+
+`AVELREN_BACKUP_TRANSFER_TIMEOUT` separately bounds host-side dump streaming: default `900` seconds, accepted range `30..7200`. `AVELREN_BACKUP_DOCKER_TIMEOUT` remains limited to short Docker/control commands.
 
 ### Exact install/upgrade procedure
 

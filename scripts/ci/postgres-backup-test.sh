@@ -58,6 +58,8 @@ else
     'host-dump-stat-failure|host dump stat failure is isolated'
     'host-dump-identity-mismatch|host dump path and FD identity mismatch is rejected'
     'host-partial-stream|partial dump stream is cleaned up'
+    'host-transfer-independent-timeout|dump transfer is independent from short Docker timeout'
+    'host-transfer-timeout|overlong dump transfer fails bounded and stops before validation'
     'repository-below-warning|repository below warning threshold succeeds'
     'runtime-stale-state|stale runtime state is rejected'
     'operation-collision-retry|operation collision preserves existing state'
@@ -148,6 +150,11 @@ assert_contains "$root/scripts/backup/postgres-backup.sh" 'dump_fd=' dump-fd-ini
 # shellcheck disable=SC2016
 assert_contains "$root/scripts/backup/postgres-backup.sh" 'if { :; } {dump_fd}>"$dump"; then' dump-open-positive-condition
 assert_contains "$root/scripts/backup/postgres-backup.sh" 'dump_create_status=$?' dump-open-status-captured
+# These are literal source-code assertions.
+# shellcheck disable=SC2016
+assert_contains "$root/scripts/backup/postgres-backup.sh" 'transfer_timeout="${AVELREN_BACKUP_TRANSFER_TIMEOUT:-900}"' transfer-timeout-default
+assert_contains "$root/scripts/backup/postgres-backup.sh" '[ "$transfer_timeout" -ge 30 ] && [ "$transfer_timeout" -le 7200 ]' transfer-timeout-range
+assert_contains "$root/scripts/backup/postgres-backup.sh" 'docker_transfer_timed exec --user 0' transfer-timeout-streaming
 # This is a literal source-code assertion.
 # shellcheck disable=SC2016
 assert_contains "$root/scripts/backup/postgres-backup.sh" '[ "$dump_create_status" -ne 0 ] || [ -z "${dump_fd:-}" ]' dump-fd-guarded-after-open
@@ -354,6 +361,10 @@ case "$args" in
     exit "${FAKE_EFFECTIVE_TMPFS_STATUS:-0}"
     ;;
   *'exec --user 0 fake-postgres sh -eu -c'*postgres.dump*)
+    if [ -n "${FAKE_STREAM_TERMINATED:-}" ]; then
+      trap 'printf "%s\n" terminated >"$FAKE_STREAM_TERMINATED"; exit 143' TERM
+    fi
+    if [ -n "${FAKE_STREAM_DELAY:-}" ]; then sleep "$FAKE_STREAM_DELAY"; fi
     if [ "${FAKE_STREAM_FAIL:-0}" = 1 ]; then
       printf '%s\n' partial-dump
       printf '%s\n' 'Injected PostgreSQL dump stream failure.' >&2
@@ -498,6 +509,7 @@ FAKE_RESTIC
 
 cat >"$fake_bin/pg_restore" <<'FAKE_PG_RESTORE'
 #!/usr/bin/env bash
+[ -z "${FAKE_PG_RESTORE_CALLS:-}" ] || printf '%s\n' "$*" >>"$FAKE_PG_RESTORE_CALLS"
 exit 0
 FAKE_PG_RESTORE
 cat >"$fake_bin/date" <<'FAKE_DATE'
@@ -573,7 +585,7 @@ setup_phase_trace="$state_root/setup-phase-trace"
 detached_reached="$state_root/detached-reached"
 mkdir -m 700 "$operation_root"
 touch "$rclone_calls" "$restic_repositories" "$restic_calls"
-root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$production_lock/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$state_root/db-created" "FAKE_DB_DROPPED=$state_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories" "FAKE_RESTIC_CALLS=$restic_calls" "FAKE_COLLISION_PROOF=$state_root/collision-proof")
+root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$production_lock/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$state_root/db-created" "FAKE_DB_DROPPED=$state_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories" "FAKE_RESTIC_CALLS=$restic_calls" "FAKE_PG_RESTORE_CALLS=$state_root/pg-restore-calls" "FAKE_COLLISION_PROOF=$state_root/collision-proof")
 root_env+=("FAKE_DOCKER_STATE=$docker_state")
 root_env+=("FAKE_DUMP_MODE=$dump_mode")
 root_env+=("FAKE_OPERATION_ROOT=$operation_root" "FAKE_SETUP_CONTROL_FILE=$setup_control_file" "FAKE_SETUP_CLEANUP_TRACE=$setup_cleanup_trace" "FAKE_DETACHED_REACHED=$detached_reached")
@@ -1677,6 +1689,8 @@ for injected_failure in FAKE_TMPDIR_CHMOD_FAIL FAKE_DUMP_STAT_FAIL FAKE_DUMP_IDE
 done
 
 begin_case host-partial-stream
+partial_stream_restore_hash="$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)"
+partial_stream_restic_hash="$(sha256sum "$restic_calls" | awk '{print $1}')"
 partial_stream_status=0
 if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_STREAM_FAIL=1 \
     "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-partial-stream.log" 2>&1; then
@@ -1686,8 +1700,43 @@ else
 fi
 assert_status 79 "$partial_stream_status" partial-stream-status
 assert_contains "$log_root/host-partial-stream.log" 'Injected PostgreSQL dump stream failure.' partial-stream-marker
+assert_owner_mode "$partial_stream_restore_hash" \
+  "$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)" partial-stream-validation-not-reached
+assert_owner_mode "$partial_stream_restic_hash" "$(sha256sum "$restic_calls" | awk '{print $1}')" partial-stream-restic-not-reached
 assert_backup_tmp_empty partial-stream-cleanup
 pass_case host-partial-stream
+
+begin_case host-transfer-independent-timeout
+diagnostics_set_assertion transfer-longer-than-docker-timeout
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
+  AVELREN_BACKUP_DOCKER_TIMEOUT=1 AVELREN_BACKUP_TRANSFER_TIMEOUT=30 FAKE_STREAM_DELAY=2 \
+  "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-transfer-independent-timeout.log" 2>&1
+assert_contains "$log_root/host-transfer-independent-timeout.log" 'PostgreSQL backup completed.' transfer-independent-completed
+assert_backup_tmp_empty transfer-independent-cleanup
+pass_case host-transfer-independent-timeout
+
+begin_case host-transfer-timeout
+transfer_terminated="$state_root/transfer-terminated"
+transfer_timeout_restore_hash="$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)"
+transfer_timeout_restic_hash="$(sha256sum "$restic_calls" | awk '{print $1}')"
+transfer_timeout_status=0
+if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
+    AVELREN_BACKUP_DOCKER_TIMEOUT=1 AVELREN_BACKUP_TRANSFER_TIMEOUT=30 FAKE_STREAM_DELAY=120 \
+    FAKE_STREAM_TERMINATED="$transfer_terminated" \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-transfer-timeout.log" 2>&1; then
+  transfer_timeout_status=0
+else
+  transfer_timeout_status=$?
+fi
+assert_status 124 "$transfer_timeout_status" transfer-timeout-status
+assert_contains "$log_root/host-transfer-timeout.log" 'PostgreSQL dump transfer failed.' transfer-timeout-diagnostic
+assert_contains_exact_line "$transfer_terminated" terminated transfer-process-terminated
+assert_owner_mode "$transfer_timeout_restore_hash" \
+  "$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)" transfer-timeout-validation-not-reached
+assert_owner_mode "$transfer_timeout_restic_hash" "$(sha256sum "$restic_calls" | awk '{print $1}')" transfer-timeout-restic-not-reached
+assert_not_contains "$log_root/host-transfer-timeout.log" fixture-password transfer-timeout-secret-absent
+assert_backup_tmp_empty transfer-timeout-cleanup
+pass_case host-transfer-timeout
 
 begin_case repository-below-warning
 diagnostics_set_assertion backup-command-success
