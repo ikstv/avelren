@@ -36,6 +36,7 @@ else
     'tmpfs-contradictory-exec|contradictory exec option is rejected'
     'tmpfs-malformed-boolean|malformed tmpfs boolean is rejected'
     'tmpfs-effective-not-tmpfs|unsafe effective mount is rejected'
+    'tmpfs-mountinfo-regression|exact-path mountinfo stacking and malformed records fail closed'
     'historical-nonempty|historical non-empty-only check remains proven unsafe'
     'host-redirection-classification|Bash host redirection behavior is classified'
     'host-open-status-classification|Bash dynamic FD status capture and persistence are classified'
@@ -625,6 +626,144 @@ assert_tmpfs_rejected tmpfs-malformed-boolean malformed-boolean 'PostgreSQL back
   'FAKE_TMPFS_OPTIONS=rw,noexec=1,nosuid,nodev,mode=0700,uid=0,gid=0'
 assert_tmpfs_rejected tmpfs-effective-not-tmpfs effective-not-tmpfs 'PostgreSQL backup runtime effective tmpfs mount is unsafe.' \
   'FAKE_EFFECTIVE_TMPFS_STATUS=1'
+
+begin_case tmpfs-mountinfo-regression
+mountinfo_target=/run/avelren-backup
+mountinfo_root="$fixture_root/mountinfo-parser"
+assert_command_succeeds mountinfo-fixture-root-create mkdir -m 700 "$mountinfo_root"
+
+valid_mount='101 1 0:42 / /run/avelren-backup rw,noexec,nosuid,nodev - tmpfs tmpfs rw,size=16777216,mode=700,uid=0,gid=0'
+second_valid_mount='104 1 0:44 / /run/avelren-backup rw,noexec,nosuid,nodev - tmpfs tmpfs rw,size=16777216,mode=700,uid=0,gid=0'
+ext4_mount='102 1 8:1 / /run/avelren-backup rw,noexec,nosuid,nodev - ext4 /dev/sda1 rw'
+missing_noexec_mount='103 1 0:43 / /run/avelren-backup rw,nosuid,nodev - tmpfs tmpfs rw,size=16777216,mode=700,uid=0,gid=0'
+
+write_mountinfo_fixture() {
+  case "$1" in
+    single-valid) printf '%s\n' "$valid_mount" ;;
+    single-ext4) printf '%s\n' "$ext4_mount" ;;
+    valid-then-ext4) printf '%s\n%s\n' "$valid_mount" "$ext4_mount" ;;
+    ext4-then-valid) printf '%s\n%s\n' "$ext4_mount" "$valid_mount" ;;
+    duplicate-valid) printf '%s\n%s\n' "$valid_mount" "$second_valid_mount" ;;
+    valid-then-missing-noexec) printf '%s\n%s\n' "$valid_mount" "$missing_noexec_mount" ;;
+    similar-path) printf '%s\n' '105 1 0:45 / /run/avelren-backup-extra rw,noexec,nosuid,nodev - tmpfs tmpfs rw,size=16777216,mode=700,uid=0,gid=0' ;;
+    nested-path) printf '%s\n' '106 1 0:46 / /run/avelren-backup/nested rw,noexec,nosuid,nodev - tmpfs tmpfs rw,size=16777216,mode=700,uid=0,gid=0' ;;
+    missing-rw) printf '%s\n' '107 1 0:47 / /run/avelren-backup ro,noexec,nosuid,nodev - tmpfs tmpfs ro,size=16777216,mode=700,uid=0,gid=0' ;;
+    missing-noexec) printf '%s\n' "$missing_noexec_mount" ;;
+    missing-nosuid) printf '%s\n' '109 1 0:49 / /run/avelren-backup rw,noexec,nodev - tmpfs tmpfs rw,size=16777216,mode=700,uid=0,gid=0' ;;
+    missing-nodev) printf '%s\n' '110 1 0:50 / /run/avelren-backup rw,noexec,nosuid - tmpfs tmpfs rw,size=16777216,mode=700,uid=0,gid=0' ;;
+    malformed-separator) printf '%s\n' '111 1 0:51 / /run/avelren-backup rw,noexec,nosuid,nodev -- tmpfs tmpfs rw,size=16777216,mode=700,uid=0,gid=0' ;;
+    malformed-filesystem) printf '%s\n' '112 1 0:52 / /run/avelren-backup rw,noexec,nosuid,nodev -' ;;
+    *) return 64 ;;
+  esac
+}
+
+mountinfo_cases=(
+  'single-valid:0'
+  'single-ext4:1'
+  'valid-then-ext4:1'
+  'ext4-then-valid:1'
+  'duplicate-valid:1'
+  'valid-then-missing-noexec:1'
+  'similar-path:1'
+  'nested-path:1'
+  'missing-rw:1'
+  'missing-noexec:1'
+  'missing-nosuid:1'
+  'missing-nodev:1'
+  'malformed-separator:1'
+  'malformed-filesystem:1'
+)
+
+for mountinfo_spec in "${mountinfo_cases[@]}"; do
+  mountinfo_case="${mountinfo_spec%%:*}"
+  diagnostics_set_assertion "mountinfo-$mountinfo_case-fixture-create"
+  write_mountinfo_fixture "$mountinfo_case" >"$mountinfo_root/$mountinfo_case.mountinfo"
+done
+
+legacy_mountinfo_status=0
+if awk -v target="$mountinfo_target" '
+    function has(options, expected,  count, item) {
+      count = split(options, item, ",")
+      for (i = 1; i <= count; i++) if (item[i] == expected) return 1
+      return 0
+    }
+    $5 == target {
+      dash = 0
+      for (i = 7; i <= NF; i++) if ($i == "-") { dash = i; break }
+      if (!dash || dash == NF || $(dash + 1) != "tmpfs") exit 1
+      if (!has($6, "rw") || !has($6, "noexec") || !has($6, "nosuid") || !has($6, "nodev")) exit 1
+      found++
+    }
+    END { exit found == 1 ? 0 : 1 }
+  ' "$mountinfo_root/valid-then-ext4.mountinfo"; then
+  legacy_mountinfo_status=0
+else
+  legacy_mountinfo_status=$?
+fi
+printf 'mountinfo-parser implementation=historical case=valid-then-ext4 contract-status=1 actual-status=%s result=DEFECT-REPRODUCED\n' \
+  "$legacy_mountinfo_status"
+assert_status 0 "$legacy_mountinfo_status" historical-stacked-mount-fail-open
+
+extract_mountinfo_parser() {
+  local source="$1" destination="$2"
+  awk '
+    /^[[:space:]]*# AVELREN_TMPFS_MOUNTINFO_AWK_BEGIN$/ {
+      if (capture || begin_count) exit 2
+      capture = 1
+      begin_count++
+      next
+    }
+    /^[[:space:]]*# AVELREN_TMPFS_MOUNTINFO_AWK_END$/ {
+      if (!capture || end_count) exit 3
+      capture = 0
+      end_count++
+      next
+    }
+    capture { print }
+    END { if (capture || begin_count != 1 || end_count != 1) exit 4 }
+  ' "$source" >"$destination"
+}
+
+for mountinfo_implementation in \
+    "production:$root/scripts/backup/postgres-backup.sh" \
+    "smoke:$root/scripts/ci/production-compose-smoke.sh"; do
+  implementation_name="${mountinfo_implementation%%:*}"
+  implementation_source="${mountinfo_implementation#*:}"
+  implementation_parser="$mountinfo_root/$implementation_name.awk"
+  assert_command_succeeds "mountinfo-$implementation_name-parser-extract" \
+    extract_mountinfo_parser "$implementation_source" "$implementation_parser"
+  assert_command_succeeds "mountinfo-$implementation_name-parser-nonempty" test -s "$implementation_parser"
+  assert_not_contains "$implementation_parser" 'exit 1' "mountinfo-$implementation_name-no-early-exit"
+  assert_contains "$implementation_parser" \
+    'END { exit found == 1 && invalid == 0 ? 0 : 1 }' \
+    "mountinfo-$implementation_name-found-invalid-contract"
+
+  for mountinfo_spec in "${mountinfo_cases[@]}"; do
+    mountinfo_case="${mountinfo_spec%%:*}"
+    expected_mountinfo_status="${mountinfo_spec#*:}"
+    actual_mountinfo_status=0
+    if awk -v target="$mountinfo_target" -f "$implementation_parser" \
+        "$mountinfo_root/$mountinfo_case.mountinfo"; then
+      actual_mountinfo_status=0
+    else
+      actual_mountinfo_status=$?
+    fi
+    if [ "$actual_mountinfo_status" -eq "$expected_mountinfo_status" ]; then
+      mountinfo_result=PASS
+    else
+      mountinfo_result=FAIL
+    fi
+    printf 'mountinfo-parser implementation=%s case=%s expected-status=%s actual-status=%s result=%s\n' \
+      "$implementation_name" "$mountinfo_case" "$expected_mountinfo_status" "$actual_mountinfo_status" "$mountinfo_result"
+    assert_status "$expected_mountinfo_status" "$actual_mountinfo_status" \
+      "mountinfo-$implementation_name-$mountinfo_case-status"
+  done
+done
+
+diagnostics_set_assertion mountinfo-fixture-cleanup
+rm -rf -- "$mountinfo_root"
+assert_file_absent "$mountinfo_root" mountinfo-fixture-removed
+pass_case tmpfs-mountinfo-regression
 
 # The historical non-empty HostConfig check accepts the missing-noexec case;
 # retain this proof so the negative matrix cannot silently regress to it.

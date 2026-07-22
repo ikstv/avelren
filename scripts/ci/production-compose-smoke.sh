@@ -114,19 +114,21 @@ runtime_root=/run/avelren-backup
 set -eu
 target="$1"
 if ! awk -v target="$target" '
+  # AVELREN_TMPFS_MOUNTINFO_AWK_BEGIN
   function has(options, expected,  count, item) {
     count = split(options, item, ",")
     for (i = 1; i <= count; i++) if (item[i] == expected) return 1
     return 0
   }
   $5 == target {
+    found++
     dash = 0
     for (i = 7; i <= NF; i++) if ($i == "-") { dash = i; break }
-    if (!dash || $(dash + 1) != "tmpfs") exit 1
-    if (!has($6, "rw") || !has($6, "noexec") || !has($6, "nosuid") || !has($6, "nodev")) exit 1
-    found++
+    if (!dash || dash == NF || $(dash + 1) != "tmpfs") { invalid = 1; next }
+    if (!has($6, "rw") || !has($6, "noexec") || !has($6, "nosuid") || !has($6, "nodev")) { invalid = 1; next }
   }
-  END { exit found == 1 ? 0 : 1 }
+  END { exit found == 1 && invalid == 0 ? 0 : 1 }
+  # AVELREN_TMPFS_MOUNTINFO_AWK_END
 ' /proc/self/mountinfo
 then
   printf '%s\n' 'Effective PostgreSQL backup tmpfs mount validation failed.' >&2
