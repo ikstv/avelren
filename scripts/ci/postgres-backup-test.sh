@@ -114,9 +114,15 @@ for script in scripts/backup/postgres-backup.sh scripts/backup/postgres-restore-
   # shellcheck disable=SC2016
   assert_contains "$root/$script" 'configure_restic_repository "$repo"' "${script_id}-repository-validator-called"
 done
-for support_file in restic-password-file.sh restic-repository.sh postgres-tcp-dump.sh postgres-backup-control.sh; do
+for support_file in restic-password-file.sh restic-repository.sh postgres-tcp-dump.sh postgres-tcp-restore.sh postgres-backup-control.sh; do
   support_id="${support_file%.sh}"
   assert_command_succeeds "${support_id}-readable" test -r "$root/scripts/backup/$support_file"
+done
+assert_command_succeeds postgres-tcp-restore-executable test -x "$root/scripts/backup/postgres-tcp-restore.sh"
+assert_contains "$root/scripts/backup/restic-repository.sh" 'RESTIC_POSTGRES_TAG=postgres' postgres-restic-tag-defined
+for tagged_script in postgres-backup.sh postgres-backup-prune.sh postgres-restore-drill.sh; do
+  assert_contains "$root/scripts/backup/$tagged_script" '--tag "$RESTIC_POSTGRES_TAG"' \
+    "${tagged_script%.sh}-postgres-restic-tag-consumed"
 done
 assert_contains "$root/scripts/backup/postgres-backup.sh" '14 * 1024 * 1024 * 1024' hard-limit-contract
 # This is a literal source-code assertion.
@@ -426,6 +432,17 @@ printf '%s\n' "${1:-missing}" >>"$FAKE_RESTIC_CALLS"
 case "${1:-}" in
   snapshots) exit 0 ;;
   backup)
+    tag=
+    tag_count=0
+    previous=
+    for argument in "$@"; do
+      if [ "$previous" = --tag ]; then
+        tag="$argument"
+        tag_count=$((tag_count + 1))
+      fi
+      previous="$argument"
+    done
+    [ "$tag_count" -eq 1 ] && [ "$tag" = postgres ] || exit 43
     dump="${!#}"
     stat -c '%u:%g:%a' "$dump" >"$FAKE_DUMP_MODE"
     if [ "${FAKE_RESTIC_FAIL:-0}" = 1 ]; then

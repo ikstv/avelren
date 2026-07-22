@@ -240,10 +240,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes shellcheck strace
-          shellcheck scripts/backup/*.sh scripts/ci/postgres-backup-diagnostics.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
+          shellcheck scripts/backup/*.sh scripts/ci/postgres-backup-diagnostics.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-restore-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
 
       - name: Bash syntax
-        run: bash -n scripts/backup/*.sh scripts/ci/postgres-backup-diagnostics.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
+        run: bash -n scripts/backup/*.sh scripts/ci/postgres-backup-diagnostics.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-restore-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
 
       - name: Backup failure-path and safety tests
         id: backup_safety
@@ -266,6 +266,9 @@ jobs:
 
       - name: PostgreSQL TCP and pgpass authentication tests
         run: sudo ./scripts/ci/postgres-backup-auth-test.sh
+
+      - name: Перевірити маршрут і cleanup PostgreSQL restore / Test PostgreSQL restore route and cleanup
+        run: timeout --signal=TERM --kill-after=15s 3m sudo ./scripts/ci/postgres-restore-test.sh
 
       - name: Secret scan
         shell: bash

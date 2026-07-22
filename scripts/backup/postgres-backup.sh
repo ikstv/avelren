@@ -370,5 +370,5 @@ control cleanup "$control_dir" "$operation_id" >/dev/null
 operation_active=0
 [ -s "$dump" ] || { printf '%s\n' 'PostgreSQL dump is empty.' >&2; exit 1; }
 pg_restore --list "$dump" >/dev/null 2>"$tmpdir/pg_restore.stderr" || { printf '%s\n' 'PostgreSQL dump validation failed.' >&2; exit 1; }
-RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$RESTIC_REPOSITORY_URL" restic backup --password-file "$password_file" --tag postgres "$dump" >/dev/null
+RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$RESTIC_REPOSITORY_URL" restic backup --password-file "$password_file" --tag "$RESTIC_POSTGRES_TAG" "$dump" >/dev/null
 printf '%s\n' 'PostgreSQL backup completed.'

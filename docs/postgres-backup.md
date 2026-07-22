@@ -16,6 +16,8 @@ Backup використовує Restic repository `rclone:<private-remote>:Avelr
 
 Custom dump створюється з `--no-owner --no-acl`, копіюється на host лише після status `0`, перевіряється `pg_restore --list`, шифрується Restic і після цього видаляється з root-only temporary directory. Host dump створюється атомарно як root-owned regular file з exact mode `0600` незалежно від umask викликача; наявний symlink, FIFO, directory або regular file відхиляється. Backup не виконує SQL mutation. Prune є окремою командою: 7 daily, 4 weekly, 3 monthly; warning — 12 GiB, hard stop нових backup-ів — 14 GiB.
 
+Restore drill вибирає `latest` лише серед snapshot-ів із тим самим PostgreSQL tag, приймає рівно один regular dump із production naming/ownership contract і відкриває його один раз через перевірений FD. `createdb`, streaming `pg_restore`, validation і `dropdb` виконуються в одному immutable PostgreSQL container через explicit TCP `127.0.0.1:5432` та root-only `PGPASSFILE` у перевіреному tmpfs; host libpq environment і host `pg_restore` не використовуються. Temporary database має випадкову identity, відмінну від `avelren`; interruption cleanup спочатку зупиняє token-scoped PostgreSQL backend створення, а потім звіряє operation token, cluster identity та database OID. Restore payload видаляється лише після повторної перевірки token та device/inode; mismatch або cleanup failure зберігає state з redacted diagnostic. Root-equivalent host/container attacker або PostgreSQL superuser поза локальною threat model цього drill.
+
 ### Точна процедура install/upgrade
 
 Команди нижче виконує root. `release_root` — абсолютний шлях до перевіреного checkout; `deploy_root` — `/opt/avelren`. Не продовжуйте після будь-якої помилки.
@@ -44,7 +46,7 @@ done
 '
 
 install -d -o root -g root -m 0700 "$rollback_root/libexec" "$rollback_root/systemd"
-for file in /usr/local/libexec/postgres-tcp-dump.sh /usr/local/libexec/postgres-backup-control.sh \
+for file in /usr/local/libexec/postgres-tcp-dump.sh /usr/local/libexec/postgres-tcp-restore.sh /usr/local/libexec/postgres-backup-control.sh \
   /usr/local/libexec/restic-password-file.sh /usr/local/libexec/restic-repository.sh \
   /usr/local/libexec/avelren-postgres-backup /usr/local/libexec/avelren-postgres-backup-init \
   /usr/local/libexec/avelren-postgres-backup-repo-check /usr/local/libexec/avelren-postgres-backup-prune \
@@ -68,7 +70,7 @@ test -n "$(docker inspect -f '{{with index .HostConfig.Tmpfs "/run/avelren-backu
 test "$(docker exec -u 0 "$container" stat -c '%u:%g:%a' /run/avelren-backup)" = 0:0:700
 
 # Helper/control/support first; main second.
-for name in postgres-tcp-dump postgres-backup-control restic-password-file restic-repository; do
+for name in postgres-tcp-dump postgres-tcp-restore postgres-backup-control restic-password-file restic-repository; do
   install -o root -g root -m 0755 "$release_root/scripts/backup/$name.sh" "/usr/local/libexec/.$name.sh.new"
   mv -T "/usr/local/libexec/.$name.sh.new" "/usr/local/libexec/$name.sh"
 done
@@ -99,7 +101,7 @@ Validation не має placeholders і не запускає backup/restore/prun
 set -eu
 release_root="$(git rev-parse --show-toplevel)"
 cmp -s "$release_root/docker-compose.yml" /opt/avelren/docker-compose.yml
-for name in postgres-tcp-dump postgres-backup-control restic-password-file restic-repository; do
+for name in postgres-tcp-dump postgres-tcp-restore postgres-backup-control restic-password-file restic-repository; do
   cmp -s "$release_root/scripts/backup/$name.sh" "/usr/local/libexec/$name.sh"
 done
 for mapping in postgres-backup.sh:avelren-postgres-backup postgres-backup-init.sh:avelren-postgres-backup-init \
@@ -107,13 +109,13 @@ for mapping in postgres-backup.sh:avelren-postgres-backup postgres-backup-init.s
   postgres-restore-drill.sh:avelren-postgres-restore-drill; do
   cmp -s "$release_root/scripts/backup/${mapping%%:*}" "/usr/local/libexec/${mapping#*:}"
 done
-for file in /usr/local/libexec/{postgres-tcp-dump.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}; do
+for file in /usr/local/libexec/{postgres-tcp-dump.sh,postgres-tcp-restore.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}; do
   test "$(stat -c '%U:%G:%a' "$file")" = root:root:755
 done
 for file in /etc/systemd/system/avelren-postgres-{backup,repo-check}.{service,timer}; do
   test "$(stat -c '%U:%G:%a' "$file")" = root:root:644
 done
-bash -n /usr/local/libexec/{postgres-tcp-dump.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}
+bash -n /usr/local/libexec/{postgres-tcp-dump.sh,postgres-tcp-restore.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}
 systemd-analyze verify /etc/systemd/system/avelren-postgres-{backup,repo-check}.{service,timer}
 docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml config --quiet
 test "$(docker exec -u 0 "$(docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml ps -q postgres)" stat -c '%u:%g:%a' /run/avelren-backup)" = 0:0:700
@@ -178,4 +180,4 @@ The validation block contains no source/destination placeholders: `release_root`
 
 Use the rollback block above with the exact timestamped `rollback_root`. It stops/disables timers, stops both oneshot services and aborts if they remain active, restores the previous main script before its matching helpers, restores units and Compose, runs `daemon-reload`, recreates PostgreSQL under the previous Compose definition, and requires validation against the previous checkout before timers may be enabled again. Repository initialization, backup, restore, and prune are never part of install or rollback.
 
-The restore drill creates a random `avelren_restore_...` database and refuses any configured production database name other than `avelren`. Unknown failures preserve drill state for investigation; cleanup occurs only after complete validation.
+The restore drill selects `latest` only within the producer's PostgreSQL tag, accepts exactly one regular dump matching the production naming/ownership contract, and opens it once through a verified FD. `createdb`, streaming `pg_restore`, validation, and `dropdb` use one immutable PostgreSQL container over explicit TCP `127.0.0.1:5432` with a root-only tmpfs `PGPASSFILE`; host libpq settings and host `pg_restore` are not used. The random temporary database differs from `avelren`; interruption cleanup first stops the token-scoped PostgreSQL creation backend, then checks the operation token, cluster identity, and recorded database OID. Restore payload removal revalidates the token and device/inode, while a mismatch or cleanup failure preserves state with a redacted diagnostic. A root-equivalent host/container attacker or PostgreSQL superuser is outside this drill's local threat model.
