@@ -1217,34 +1217,32 @@ pass_case tmpfs-mountinfo-regression
 # retain this proof so the negative matrix cannot silently regress to it.
 begin_case historical-nonempty
 legacy_backup="$test_root/legacy-postgres-backup.sh"
-history_file="$log_root/history-list"
 legacy_probe="$log_root/legacy-probe"
-legacy_ref=
-history_status=0
-if git -C "$root" rev-list HEAD >"$history_file"; then
-  history_status=0
-else
-  history_status=$?
-fi
-assert_status 0 "$history_status" history-list
-while read -r candidate; do
-  if git -C "$root" show "$candidate:scripts/backup/postgres-backup.sh" >"$legacy_probe" 2>/dev/null \
-      && grep -Fq 'PostgreSQL backup runtime is not tmpfs-backed.' "$legacy_probe" 2>/dev/null; then
-    legacy_ref="$candidate"
-    break
-  fi
-done <"$history_file"
-assert_nonempty "$legacy_ref" legacy-fixture-found
-legacy_materialize_status=0
-if git -C "$root" show "$legacy_ref:scripts/backup/postgres-backup.sh" >"$legacy_probe"; then
-  legacy_materialize_status=0
-else
-  legacy_materialize_status=$?
-fi
-assert_status 0 "$legacy_materialize_status" legacy-fixture-materialized
+# Materialize a deterministic negative mutation of the current controller:
+# replace only its exact declared-tmpfs validator with the historical
+# non-empty-only predicate. This remains stable across squash merges.
+# The embedded shell source is intentionally emitted from single-quoted awk.
+# shellcheck disable=SC2016
+awk '
+  /^declared_tmpfs_is_secure\(\) \{$/ {
+    found++
+    print
+    print "  local options"
+    print "  options=\"$(docker_timed inspect -f '\''{{with index .HostConfig.Tmpfs \"/run/avelren-backup\"}}{{.}}{{end}}'\'' \"$container\")\" || return 1"
+    print "  [ -n \"$options\" ]"
+    replacing=1
+    next
+  }
+  replacing && /^}$/ { print; replacing=0; next }
+  replacing { next }
+  { print }
+  END { if (found != 1 || replacing) exit 65 }
+' "$root/scripts/backup/postgres-backup.sh" >"$legacy_probe"
+assert_command_succeeds legacy-fixture-nonempty test -s "$legacy_probe"
 assert_command_succeeds legacy-fixture-copied "${runner[@]}" cp "$legacy_probe" "$legacy_backup"
 "${runner[@]}" cp "$root/scripts/backup/restic-password-file.sh" "$root/scripts/backup/restic-repository.sh" \
-  "$root/scripts/backup/postgres-tcp-dump.sh" "$root/scripts/backup/postgres-backup-control.sh" "$test_root/"
+  "$root/scripts/backup/secure-lock-file.sh" "$root/scripts/backup/postgres-tcp-dump.sh" \
+  "$root/scripts/backup/postgres-backup-control.sh" "$test_root/"
 "${runner[@]}" chmod 700 "$legacy_backup"
 diagnostics_set_assertion legacy-backup-command-success
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
