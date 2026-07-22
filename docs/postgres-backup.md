@@ -10,6 +10,10 @@ Backup використовує Restic repository `rclone:<private-remote>:Avelr
 
 Перед стартом нова операція fail-closed відмовляється працювати, якщо runtime має state іншої операції. Directory створюється атомарним `mkdir`; collision ніколи не перезаписує runner, heartbeat чи identity і повторюється не більше п’яти разів. `flock` додатково забороняє конкурентні host-side backup-и.
 
+Host locks мають окремий runtime namespace `/run/avelren` (`root:root 0700`): `/run/avelren/postgres-backup.lock` і `/run/avelren/postgres-restore.lock` є різними logical locks та regular files `root:root 0600`. Backup unit створює лише цей namespace через `RuntimeDirectory=avelren`, зберігає його до reboot через `RuntimeDirectoryPreserve=yes` і не має write access до shared `/run/lock`; repo-check unit не має write access до lock namespace. Прямий root-запуск створює лише відсутній exact leaf під root-controlled `/run`, а existing symlink, non-directory або directory з іншими owner/group/mode відхиляє без repair. Lock helper відхиляє symlink, FIFO, socket/device/directory, hardlink, неправильні owner/group/mode та path/FD identity mismatch; absent file створює з observed `O_CREAT|O_EXCL`, existing valid file відкриває без truncation і повторно звіряє device/inode після `flock`. Bash не надає `O_NOFOLLOW`: локальний invariant спирається на root-controlled parent, exact `0700` namespace, atomic creation і post-open identity checks; root-equivalent attacker поза цією threat model.
+
+`AVELREN_BACKUP_LOCK_FILE` лишається сумісним override повного absolute canonical file path. Його `dirname` є dedicated leaf namespace: parent уже має існувати, бути root-owned і не бути untrusted writable; script створює лише exact missing leaf, ніколи не `chmod`/`chown` existing directory і fail-closed відхиляє unsafe path components або object. Для systemd non-default path додатково має бути явно writable для unit, не перебувати у private `/tmp`/`/var/tmp` namespace і однаково задаватися для всіх відповідних manual/timer запусків; documented default є підтримуваним спільним domain для цих запусків. Старі direct files `/run/lock/avelren-postgres-backup.lock` та `/run/lock/avelren-postgres-restore.lock` новий release не відкриває і не видаляє; вони зникають природно після reboot. Release навмисно не перевіряє й не ремонтує metadata shared `/run/lock`: якщо старий script уже пошкодив її, потрібні reboot або окреме OS-specific відновлення адміністратором. Mixed old/new releases не мають спільного lock domain, а shared deployment/operation gate лишається окремим невирішеним етапом.
+
 При SIGINT/SIGTERM controller надсилає TERM лише supervisor перевіреної операції. Під час setup окремий 128-bit token передає host-у cleanup ownership до blocking `docker exec`; exact directory видаляється лише після повторної перевірки цього root-only marker, а collision або missing/mismatched marker зберігається fail-closed. Supervisor робить для `pg_dump`: TERM → bounded wait → KILL → `wait`, потім так само завершує і reap-ить watchdog та виходить останнім. Host escalation перевіряє operation ID, PID, `/proc` start time і operation token повторно безпосередньо перед кожним scoped signal. Це defense against PID reuse/stale identifiers, а не абсолютна атомарна гарантія kernel-level identity-and-signal. SIGINT повертає 130, SIGTERM — 143.
 
 Якщо Docker daemon недоступний, controller не вгадує PID і не видаляє неперевірений state. Після відновлення daemon живий watchdog завершує операцію; restart/recreate контейнера гарантовано очищає tmpfs. Paused/frozen контейнер не може виконувати traps або watchdog: credential залишається root-only у RAM tmpfs до unpause з cleanup або restart/recreate. Timer не слід перезапускати, доки попередній state не зник і контейнер не healthy.
@@ -47,7 +51,7 @@ done
 
 install -d -o root -g root -m 0700 "$rollback_root/libexec" "$rollback_root/systemd"
 for file in /usr/local/libexec/postgres-tcp-dump.sh /usr/local/libexec/postgres-tcp-restore.sh /usr/local/libexec/postgres-backup-control.sh \
-  /usr/local/libexec/restic-password-file.sh /usr/local/libexec/restic-repository.sh \
+  /usr/local/libexec/restic-password-file.sh /usr/local/libexec/restic-repository.sh /usr/local/libexec/secure-lock-file.sh \
   /usr/local/libexec/avelren-postgres-backup /usr/local/libexec/avelren-postgres-backup-init \
   /usr/local/libexec/avelren-postgres-backup-repo-check /usr/local/libexec/avelren-postgres-backup-prune \
   /usr/local/libexec/avelren-postgres-restore-drill; do
@@ -70,7 +74,7 @@ test -n "$(docker inspect -f '{{with index .HostConfig.Tmpfs "/run/avelren-backu
 test "$(docker exec -u 0 "$container" stat -c '%u:%g:%a' /run/avelren-backup)" = 0:0:700
 
 # Helper/control/support first; main second.
-for name in postgres-tcp-dump postgres-tcp-restore postgres-backup-control restic-password-file restic-repository; do
+for name in postgres-tcp-dump postgres-tcp-restore postgres-backup-control restic-password-file restic-repository secure-lock-file; do
   install -o root -g root -m 0755 "$release_root/scripts/backup/$name.sh" "/usr/local/libexec/.$name.sh.new"
   mv -T "/usr/local/libexec/.$name.sh.new" "/usr/local/libexec/$name.sh"
 done
@@ -101,7 +105,7 @@ Validation не має placeholders і не запускає backup/restore/prun
 set -eu
 release_root="$(git rev-parse --show-toplevel)"
 cmp -s "$release_root/docker-compose.yml" /opt/avelren/docker-compose.yml
-for name in postgres-tcp-dump postgres-tcp-restore postgres-backup-control restic-password-file restic-repository; do
+for name in postgres-tcp-dump postgres-tcp-restore postgres-backup-control restic-password-file restic-repository secure-lock-file; do
   cmp -s "$release_root/scripts/backup/$name.sh" "/usr/local/libexec/$name.sh"
 done
 for mapping in postgres-backup.sh:avelren-postgres-backup postgres-backup-init.sh:avelren-postgres-backup-init \
@@ -109,14 +113,17 @@ for mapping in postgres-backup.sh:avelren-postgres-backup postgres-backup-init.s
   postgres-restore-drill.sh:avelren-postgres-restore-drill; do
   cmp -s "$release_root/scripts/backup/${mapping%%:*}" "/usr/local/libexec/${mapping#*:}"
 done
-for file in /usr/local/libexec/{postgres-tcp-dump.sh,postgres-tcp-restore.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}; do
+for file in /usr/local/libexec/{postgres-tcp-dump.sh,postgres-tcp-restore.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,secure-lock-file.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}; do
   test "$(stat -c '%U:%G:%a' "$file")" = root:root:755
 done
 for file in /etc/systemd/system/avelren-postgres-{backup,repo-check}.{service,timer}; do
   test "$(stat -c '%U:%G:%a' "$file")" = root:root:644
 done
-bash -n /usr/local/libexec/{postgres-tcp-dump.sh,postgres-tcp-restore.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}
+bash -n /usr/local/libexec/{postgres-tcp-dump.sh,postgres-tcp-restore.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,secure-lock-file.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}
 systemd-analyze verify /etc/systemd/system/avelren-postgres-{backup,repo-check}.{service,timer}
+test "$(systemctl show avelren-postgres-backup.service -p RuntimeDirectory --value)" = avelren
+test "$(systemctl show avelren-postgres-backup.service -p RuntimeDirectoryMode --value)" = 0700
+test "$(systemctl show avelren-postgres-backup.service -p RuntimeDirectoryPreserve --value)" = yes
 docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml config --quiet
 test "$(docker exec -u 0 "$(docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml ps -q postgres)" stat -c '%u:%g:%a' /run/avelren-backup)" = 0:0:700
 ```
@@ -164,6 +171,10 @@ Backups use the Restic repository `rclone:<private-remote>:Avelren Backups/resti
 
 A new operation fails closed when runtime state from another operation exists. Atomic `mkdir` creation never overwrites another runner, heartbeat, or identity, and collision retry is bounded to five attempts. `flock` also prevents concurrent host-side backups.
 
+Host locks use the dedicated runtime namespace `/run/avelren` (`root:root 0700`): `/run/avelren/postgres-backup.lock` and `/run/avelren/postgres-restore.lock` are separate logical locks and `root:root 0600` regular files. The backup unit creates only this namespace with `RuntimeDirectory=avelren`, preserves it until reboot with `RuntimeDirectoryPreserve=yes`, and has no write access to shared `/run/lock`; the repo-check unit has no write access to the lock namespace. A direct root invocation creates only the absent exact leaf below root-controlled `/run`, while an existing symlink, non-directory, or directory with wrong owner/group/mode is rejected without repair. The lock helper rejects symlinks, FIFOs, sockets/devices/directories, hardlinks, wrong owner/group/mode, and path/FD identity mismatches; it creates an absent file with observed `O_CREAT|O_EXCL`, opens an existing valid file without truncation, and revalidates device/inode after `flock`. Bash does not provide `O_NOFOLLOW`: the local invariant rests on the root-controlled parent, exact `0700` namespace, atomic creation, and post-open identity checks; a root-equivalent attacker is outside this threat model.
+
+`AVELREN_BACKUP_LOCK_FILE` remains a compatible override for a full absolute canonical file path. Its `dirname` is a dedicated leaf namespace: the parent must already exist, be root-owned, and not be untrusted-writable; the script creates only the exact missing leaf, never `chmod`s/`chown`s an existing directory, and rejects unsafe path components or objects fail-closed. For systemd, a non-default path must additionally be made explicitly writable to the unit, stay outside the private `/tmp`/`/var/tmp` namespace, and be configured consistently for all applicable manual/timer invocations; the documented default is the supported common domain for those invocations. The new release neither opens nor removes the legacy direct files `/run/lock/avelren-postgres-backup.lock` and `/run/lock/avelren-postgres-restore.lock`; they disappear naturally after reboot. The release intentionally neither validates nor repairs shared `/run/lock` metadata: if an old script already damaged it, reboot or separate OS-specific administrator recovery is required. Mixed old/new releases do not share a lock domain, and a shared deployment/operation gate remains a separate unresolved cycle.
+
 On SIGINT/SIGTERM, the controller sends TERM only to the validated operation supervisor. During setup, an independent 128-bit token hands cleanup ownership to the host before the blocking `docker exec`; the exact directory is removed only after that root-only marker is revalidated, while a collision or missing/mismatched marker is preserved fail-closed. The supervisor performs TERM → bounded wait → KILL → `wait` for `pg_dump`, then stops and reaps the watchdog, and exits last. Host escalation revalidates the operation ID, PID, `/proc` start time, and operation token immediately before every scoped signal. This is defense against PID reuse/stale identifiers, not an absolute atomic kernel identity-and-signal guarantee. SIGINT returns 130 and SIGTERM returns 143.
 
 When the Docker daemon is unavailable, the controller neither guesses a PID nor removes unverified state. A live watchdog completes cancellation after daemon recovery; container restart/recreation guarantees tmpfs cleanup. A paused/frozen container cannot run traps or the watchdog: the credential remains root-only in RAM-backed tmpfs until unpause and cleanup or restart/recreation. Do not restart the timer until the prior state is gone and PostgreSQL is healthy.
@@ -172,7 +183,7 @@ The custom dump uses `--no-owner --no-acl`, is copied to the host only after sta
 
 ### Exact install/upgrade procedure
 
-Use the complete command blocks in the Ukrainian section above; commands and paths are language-independent. They stop and disable both timers, stop active oneshot services, abort if either service remains active, verify that no old or new runtime operation exists, save an executable rollback set, install and recreate the Compose tmpfs, install helper/control/support scripts first and the main script second, install systemd units last, and run `daemon-reload`.
+Use the complete command blocks in the Ukrainian section above; commands and paths are language-independent. They stop and disable both timers, stop active oneshot services, abort if either service remains active, verify that no old or new runtime operation exists, save an executable rollback set, install and recreate the Compose tmpfs, install the secure-lock and other helper/control/support scripts first and the main script second, install systemd units last, and run `daemon-reload`.
 
 The validation block contains no source/destination placeholders: `release_root` is resolved from the verified checkout with `git rev-parse`. It compares every exact source/destination pair, verifies ownership/modes and shell syntax, validates systemd units and Compose, and confirms runtime mode `0700`. It does not run backup, restore, prune, or repository initialization. Enable/start timers only after every command passes. A missing, non-executable, mismatched helper or non-tmpfs runtime is an unconditional abort.
 

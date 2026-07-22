@@ -7,12 +7,15 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # Resolved relative to the installed script directory.
 # shellcheck disable=SC1091
 . "$script_dir/restic-repository.sh"
+# Resolved relative to the installed script directory.
+# shellcheck disable=SC1091
+. "$script_dir/secure-lock-file.sh"
 
 [ "$(id -u)" -eq 0 ] || { printf '%s\n' 'This drill must run as root.' >&2; exit 1; }
 compose_file="${AVELREN_COMPOSE_FILE:-/opt/avelren/docker-compose.yml}"
 env_file="${AVELREN_ENV_FILE:-/opt/avelren/.env.production}"
 tmp_root="${AVELREN_BACKUP_TMP_ROOT:-/var/lib/avelren-backup/tmp}"
-lock_file="${AVELREN_BACKUP_LOCK_FILE:-/run/lock/avelren-postgres-restore.lock}"
+lock_file="${AVELREN_BACKUP_LOCK_FILE:-/run/avelren/postgres-restore.lock}"
 log_root="${AVELREN_RESTORE_LOG_ROOT:-/var/log}"
 remote="${AVELREN_RCLONE_REMOTE:?AVELREN_RCLONE_REMOTE is required}"
 password_file="${AVELREN_RESTIC_PASSWORD_FILE:-/etc/avelren/backup/restic_password}"
@@ -293,9 +296,19 @@ validate_restic_password_file "$password_file" || exit 1
   printf '%s\n' 'rclone config must be root:root mode 0600.' >&2
   exit 1
 }
-install -d -o root -g root -m 700 "$tmp_root" "$(dirname "$lock_file")"
-exec 9>"$lock_file"
-flock -n 9 || { printf '%s\n' 'Another PostgreSQL restore drill is running.' >&2; exit 1; }
+install -d -o root -g root -m 700 "$tmp_root"
+lock_status=0
+if avelren_secure_lock_acquire "$lock_file"; then
+  lock_status=0
+else
+  lock_status=$?
+fi
+case "$lock_status" in
+  0) ;;
+  73) printf '%s\n' 'PostgreSQL restore lock directory is unsafe.' >&2; exit 1 ;;
+  75) printf '%s\n' 'Another PostgreSQL restore drill is running.' >&2; exit 1 ;;
+  *) printf '%s\n' 'PostgreSQL restore lock file is unsafe.' >&2; exit 1 ;;
+esac
 
 container="$("${compose[@]}" ps -q postgres)"
 case "$container" in ''|*[!a-f0-9]*) printf '%s\n' 'PostgreSQL container is unavailable.' >&2; exit 1 ;; esac

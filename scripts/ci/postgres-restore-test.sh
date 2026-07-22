@@ -7,6 +7,7 @@ helper="$root/scripts/backup/postgres-tcp-restore.sh"
 disposable_base="${RUNNER_TEMP:-/tmp}"
 test_root=
 capture_root=
+lock_root=
 root_runner=()
 active_launch_pid=
 active_outer_pid=
@@ -49,7 +50,7 @@ assert_not_contains() {
 safe_disposable_directory() {
   local path="$1"
   case "$path" in
-    "$disposable_base"/avelren-restore-test.*|"$disposable_base"/avelren-restore-capture.*)
+    "$disposable_base"/avelren-restore-test.*|"$disposable_base"/avelren-restore-capture.*|/var/tmp/avelren-restore-lock.*)
       [ -n "$path" ] && [ "$path" != / ] && [ "$path" != "$HOME" ] &&
         [ -d "$path" ] && [ ! -L "$path" ]
       ;;
@@ -58,7 +59,7 @@ safe_disposable_directory() {
 }
 
 cleanup() {
-  local status=$?
+  local status=$? cleanup_failed=0
   trap - EXIT INT TERM HUP
   set +e
   if ! [[ "$active_outer_pid" =~ ^[0-9]+$ ]] && [ -n "$outer_pid_file" ] && [ -s "$outer_pid_file" ]; then
@@ -75,10 +76,26 @@ cleanup() {
     wait "$active_launch_pid" 2>/dev/null || true
   fi
   if [ -n "$test_root" ] && safe_disposable_directory "$test_root"; then
-    "${root_runner[@]}" rm -rf -- "$test_root"
+    "${root_runner[@]}" rm -rf -- "$test_root" || cleanup_failed=1
+    [ ! -e "$test_root" ] && [ ! -L "$test_root" ] || cleanup_failed=1
+  elif [ -n "$test_root" ]; then
+    cleanup_failed=1
   fi
   if [ -n "$capture_root" ] && safe_disposable_directory "$capture_root"; then
-    "${root_runner[@]}" rm -rf -- "$capture_root"
+    "${root_runner[@]}" rm -rf -- "$capture_root" || cleanup_failed=1
+    [ ! -e "$capture_root" ] && [ ! -L "$capture_root" ] || cleanup_failed=1
+  elif [ -n "$capture_root" ]; then
+    cleanup_failed=1
+  fi
+  if [ -n "$lock_root" ] && safe_disposable_directory "$lock_root"; then
+    "${root_runner[@]}" rm -rf -- "$lock_root" || cleanup_failed=1
+    [ ! -e "$lock_root" ] && [ ! -L "$lock_root" ] || cleanup_failed=1
+  elif [ -n "$lock_root" ]; then
+    cleanup_failed=1
+  fi
+  if [ "$cleanup_failed" -ne 0 ]; then
+    printf '%s\n' 'FAIL: restore fixture cleanup was incomplete.' >&2
+    [ "$status" -ne 0 ] || status=1
   fi
   exit "$status"
 }
@@ -98,12 +115,15 @@ capture_root="$(mktemp -d "$disposable_base/avelren-restore-capture.XXXXXX")"
 chmod 700 "$test_root" "$capture_root"
 fake_bin="$test_root/bin"
 production_tmp="$test_root/production-tmp"
-production_lock="$test_root/production-lock"
+lock_root="$("${root_runner[@]}" mktemp -d /var/tmp/avelren-restore-lock.XXXXXX)"
+production_lock="$lock_root/avelren"
 state_root="$capture_root/state"
 fixture_root="$capture_root/fixtures"
 log_root="$capture_root/logs"
 production_log_root="$test_root/production-log"
-mkdir -m 700 "$fake_bin" "$production_tmp" "$production_lock" "$state_root" "$fixture_root" "$log_root" "$production_log_root"
+mkdir -m 700 "$fake_bin" "$production_tmp" "$state_root" "$fixture_root" "$log_root" "$production_log_root"
+"${root_runner[@]}" mkdir -m 700 -- "$production_lock"
+"${root_runner[@]}" chown root:root "$lock_root" "$production_lock"
 "${root_runner[@]}" chown root:root "$production_log_root"
 
 compose_file="$test_root/compose.yml"
@@ -717,6 +737,105 @@ wait_for_process_exit() {
     sleep 0.05
   done
 }
+
+reset_case
+restore_lock_directory_unsafe="$lock_root/unsafe-lock-directory"
+restore_lock_directory_path="$restore_lock_directory_unsafe/restore.lock"
+"${root_runner[@]}" mkdir -m 0755 -- "$restore_lock_directory_unsafe"
+restore_lock_directory_identity="$("${root_runner[@]}" stat -c '%d:%i:%u:%g:%a' -- "$restore_lock_directory_unsafe")"
+restore_lock_directory_log="$log_root/restore-lock-directory-unsafe.log"
+restore_lock_directory_status="$(run_restore one "$restore_lock_directory_log" \
+  "AVELREN_BACKUP_LOCK_FILE=$restore_lock_directory_path")"
+assert_status 1 "$restore_lock_directory_status" restore-lock-directory-status
+[ "$(grep -Fxc 'PostgreSQL restore lock directory is unsafe.' "$restore_lock_directory_log" || true)" -eq 1 ] ||
+  fail 'restore lock directory diagnostic was not exact'
+[ ! -s "$docker_calls" ] || fail 'restore unsafe lock directory reached Docker'
+[ ! -s "$restic_proof" ] || fail 'restore unsafe lock directory reached Restic'
+[ "$("${root_runner[@]}" stat -c '%d:%i:%u:%g:%a' -- "$restore_lock_directory_unsafe")" = \
+  "$restore_lock_directory_identity" ] || fail 'restore unsafe lock directory was repaired'
+"${root_runner[@]}" rmdir -- "$restore_lock_directory_unsafe"
+[ ! -e "$restore_lock_directory_unsafe" ] && [ ! -L "$restore_lock_directory_unsafe" ] ||
+  fail 'restore unsafe lock directory cleanup failed'
+pass restore-lock-directory-unsafe
+
+reset_case
+restore_lock_path="$production_lock/restore.lock"
+"${root_runner[@]}" rm -f -- "$restore_lock_path"
+restore_lock_target="$fixture_root/lock-secret-target"
+printf '%s' 'restore-lock-secret-canary' >"$restore_lock_target"
+chmod 600 "$restore_lock_target"
+restore_lock_target_identity="$(stat -c '%d:%i:%u:%g:%a:%s' "$restore_lock_target")"
+restore_lock_target_hash="$(sha256sum "$restore_lock_target" | awk '{print $1}')"
+"${root_runner[@]}" ln -s "$restore_lock_target" "$restore_lock_path"
+restore_lock_symlink_log="$log_root/restore-lock-symlink.log"
+restore_lock_symlink_status="$(run_restore one "$restore_lock_symlink_log")"
+assert_status 1 "$restore_lock_symlink_status" restore-lock-symlink-status
+[ "$(grep -Fxc 'PostgreSQL restore lock file is unsafe.' "$restore_lock_symlink_log" || true)" -eq 1 ] ||
+  fail 'restore lock symlink diagnostic was not exact'
+[ ! -s "$docker_calls" ] || fail 'restore lock symlink reached Docker'
+[ ! -s "$restic_proof" ] || fail 'restore lock symlink reached Restic'
+"${root_runner[@]}" test -L "$restore_lock_path" || fail 'restore lock symlink was replaced'
+[ "$(stat -c '%d:%i:%u:%g:%a:%s' "$restore_lock_target")" = "$restore_lock_target_identity" ] ||
+  fail 'restore lock symlink target metadata changed'
+[ "$(sha256sum "$restore_lock_target" | awk '{print $1}')" = "$restore_lock_target_hash" ] ||
+  fail 'restore lock symlink target content changed'
+assert_not_contains "$restore_lock_symlink_log" restore-lock-secret-canary restore-lock-symlink-redaction
+"${root_runner[@]}" rm -f -- "$restore_lock_path"
+rm -f -- "$restore_lock_target"
+pass restore-lock-symlink-rejected
+
+reset_case
+restore_lock_ready="$restic_ready"
+restore_lock_release="$fixture_root/restore-lock-release"
+rm -f -- "$restore_lock_release"
+mkfifo -- "$restore_lock_release"
+restore_lock_holder_log="$log_root/restore-lock-holder.log"
+"${root_runner[@]}" env "${common_env[@]}" "${hostile_pg_env[@]}" \
+  FAKE_RESTORE_LAYOUT=one FAKE_RESTIC_BARRIER=1 FAKE_RESTIC_RELEASE="$restore_lock_release" \
+  AVELREN_TEST_OUTER_PID_FILE="$outer_pid_file" \
+  setsid --wait "$test_root/signal-launch.py" "$drill" >"$restore_lock_holder_log" 2>&1 &
+restore_lock_holder_pid=$!
+active_launch_pid="$restore_lock_holder_pid"
+wait_for_marker "$restore_lock_ready" "$restore_lock_holder_pid" || fail 'restore lock holder did not acquire the lock'
+restore_lock_holder_outer_pid="$(cat "$outer_pid_file")"
+case "$restore_lock_holder_outer_pid" in ''|*[!0-9]*) fail 'restore lock holder outer pid was invalid' ;; esac
+active_outer_pid="$restore_lock_holder_outer_pid"
+restore_lock_restic_hash="$(sha256sum "$restic_proof" | awk '{print $1}')"
+restore_lock_target_hash="$(sha256sum "$restore_target" | awk '{print $1}')"
+restore_lock_docker_hash="$(sha256sum "$docker_calls" | awk '{print $1}')"
+restore_lock_contention_log="$log_root/restore-lock-contention.log"
+restore_lock_contention_status="$(run_restore one "$restore_lock_contention_log")"
+assert_status 1 "$restore_lock_contention_status" restore-lock-contention-status
+[ "$(grep -Fxc 'Another PostgreSQL restore drill is running.' "$restore_lock_contention_log" || true)" -eq 1 ] ||
+  fail 'restore contention diagnostic was not exact'
+[ "$(sha256sum "$restic_proof" | awk '{print $1}')" = "$restore_lock_restic_hash" ] ||
+  fail 'restore contender reached Restic'
+[ "$(sha256sum "$restore_target" | awk '{print $1}')" = "$restore_lock_target_hash" ] ||
+  fail 'restore contender changed the restore target'
+[ "$(sha256sum "$docker_calls" | awk '{print $1}')" = "$restore_lock_docker_hash" ] ||
+  fail 'restore contender reached Docker'
+# Positional expansion belongs to the bounded FIFO release helper.
+# shellcheck disable=SC2016
+timeout 3 bash -c 'printf "%s\n" release >"$1"' sh "$restore_lock_release" ||
+  fail 'restore lock holder barrier release failed'
+wait_for_process_exit "$restore_lock_holder_pid" || fail 'restore lock holder did not exit'
+restore_lock_holder_status=0
+if wait "$restore_lock_holder_pid"; then restore_lock_holder_status=0; else restore_lock_holder_status=$?; fi
+active_launch_pid=
+active_outer_pid=
+assert_status 0 "$restore_lock_holder_status" restore-lock-holder-status
+assert_action_sequence 'create,restore,validate,cleanup' restore-lock-holder-actions
+assert_runtime_empty restore-lock-holder-cleanup
+assert_no_secret "$restore_lock_holder_log" restore-lock-holder-redaction
+rm -f -- "$restore_lock_release"
+restore_lock_release=
+reset_case
+restore_lock_release_log="$log_root/restore-lock-release.log"
+restore_lock_release_status="$(run_restore one "$restore_lock_release_log")"
+assert_status 0 "$restore_lock_release_status" restore-lock-release-status
+assert_action_sequence 'create,restore,validate,cleanup' restore-lock-release-actions
+assert_runtime_empty restore-lock-release-cleanup
+pass restore-lock-mutual-exclusion
 
 run_setup_directory_signal_case() {
   local signal="$1" expected_status="$2" label="restore-directory-handoff-${1,,}"

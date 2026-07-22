@@ -10,16 +10,16 @@ compose_file="${AVELREN_TEST_COMPOSE_FILE:?}"
 environment_file="${AVELREN_TEST_ENV_FILE:?}"
 project_name="${COMPOSE_PROJECT_NAME:?}"
 test_root="${AVELREN_TEST_ROOT:?}/backup-cancel"
+lock_root=
 container="$(docker compose --project-name "$project_name" --env-file "$environment_file" \
   --file "$compose_file" ps -q postgres)"
 [ -n "$container" ]
 
 case "$test_root" in /tmp/avelren-compose-smoke.*/backup-cancel) ;; *) exit 90 ;; esac
-rm -rf -- "$test_root"
-install -d -o root -g root -m 700 "$test_root" "$test_root/bin" "$test_root/backup-tmp"
 
 cleanup() {
   exit_code=$?
+  cleanup_failed=0
   trap - EXIT INT TERM
   if [ -n "${sentinel_pid:-}" ]; then
     docker exec --user 0 "$container" sh -c 'kill -TERM "$1" 2>/dev/null || true' sh "$sentinel_pid" >/dev/null 2>&1 || true
@@ -29,10 +29,33 @@ cleanup() {
   fi
   [ -z "${sentinel_exec_pid:-}" ] || wait "$sentinel_exec_pid" 2>/dev/null || true
   [ -z "${locker_exec_pid:-}" ] || wait "$locker_exec_pid" 2>/dev/null || true
-  rm -rf -- "$test_root"
+  rm -rf -- "$test_root" || cleanup_failed=1
+  [ ! -e "$test_root" ] && [ ! -L "$test_root" ] || cleanup_failed=1
+  case "${lock_root:-}" in
+    /var/tmp/avelren-compose-lock.*)
+      if [ ! -L "$lock_root" ]; then
+        rm -rf -- "$lock_root" || cleanup_failed=1
+      else
+        cleanup_failed=1
+      fi
+      [ ! -e "$lock_root" ] && [ ! -L "$lock_root" ] || cleanup_failed=1
+      ;;
+    '') ;;
+    *) cleanup_failed=1 ;;
+  esac
+  if [ "$cleanup_failed" -ne 0 ]; then
+    printf '%s\n' 'FAIL: cancellation fixture cleanup was incomplete.' >&2
+    [ "$exit_code" -ne 0 ] || exit_code=1
+  fi
   exit "$exit_code"
 }
 trap cleanup EXIT
+
+rm -rf -- "$test_root"
+install -d -o root -g root -m 700 "$test_root" "$test_root/bin" "$test_root/backup-tmp"
+lock_root="$(mktemp -d /var/tmp/avelren-compose-lock.XXXXXX)"
+production_lock="$lock_root/avelren"
+mkdir -m 700 -- "$production_lock"
 
 cat >"$test_root/bin/rclone" <<'EOF'
 #!/bin/sh
@@ -224,7 +247,7 @@ run_cancel_case() {
     AVELREN_COMPOSE_FILE="$compose_file" \
     AVELREN_ENV_FILE="$environment_file" \
     AVELREN_BACKUP_TMP_ROOT="$test_root/backup-tmp" \
-    AVELREN_BACKUP_LOCK_FILE="$test_root/backup.lock" \
+    AVELREN_BACKUP_LOCK_FILE="$production_lock/backup.lock" \
     AVELREN_RCLONE_REMOTE=test-remote \
     AVELREN_RESTIC_PASSWORD_FILE="$test_root/restic_password" \
     AVELREN_RCLONE_CONFIG="$test_root/rclone.conf" \

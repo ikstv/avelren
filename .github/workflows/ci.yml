@@ -226,7 +226,7 @@ jobs:
   backup:
     name: PostgreSQL backup safety
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -240,10 +240,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes shellcheck strace
-          shellcheck scripts/backup/*.sh scripts/ci/postgres-backup-diagnostics.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-restore-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
+          shellcheck scripts/backup/*.sh scripts/ci/secure-lock-test.sh scripts/ci/postgres-backup-diagnostics.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-restore-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
 
       - name: Bash syntax
-        run: bash -n scripts/backup/*.sh scripts/ci/postgres-backup-diagnostics.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-restore-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
+        run: bash -n scripts/backup/*.sh scripts/ci/secure-lock-test.sh scripts/ci/postgres-backup-diagnostics.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-restore-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
+
+      - name: Secure host-lock namespace tests
+        run: timeout --signal=TERM --kill-after=5s 2m sudo ./scripts/ci/secure-lock-test.sh
 
       - name: Backup failure-path and safety tests
         id: backup_safety

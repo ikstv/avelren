@@ -24,6 +24,9 @@ else
     'password-validator|Restic password file validation matrix'
     'repository-validator|Restic repository validation matrix'
     'helper-entrypoints|backup helper entrypoints and routing'
+    'host-lock-directory-unsafe|production backup maps unsafe lock directory failure'
+    'host-lock-symlink|production backup rejects a symlink lock without opening its target'
+    'host-lock-contention|production backup preserves exact lock contention behavior'
     'tmpfs-reordered|reordered secure tmpfs options are accepted'
     'tmpfs-canonical-mode|Docker canonical mode 700 is accepted'
     'tmpfs-missing-noexec|missing noexec is rejected'
@@ -114,11 +117,21 @@ for script in scripts/backup/postgres-backup.sh scripts/backup/postgres-restore-
   # shellcheck disable=SC2016
   assert_contains "$root/$script" 'configure_restic_repository "$repo"' "${script_id}-repository-validator-called"
 done
-for support_file in restic-password-file.sh restic-repository.sh postgres-tcp-dump.sh postgres-tcp-restore.sh postgres-backup-control.sh; do
+for support_file in restic-password-file.sh restic-repository.sh secure-lock-file.sh postgres-tcp-dump.sh postgres-tcp-restore.sh postgres-backup-control.sh; do
   support_id="${support_file%.sh}"
   assert_command_succeeds "${support_id}-readable" test -r "$root/scripts/backup/$support_file"
 done
 assert_command_succeeds postgres-tcp-restore-executable test -x "$root/scripts/backup/postgres-tcp-restore.sh"
+for lock_script in postgres-backup.sh postgres-restore-drill.sh; do
+  # These are literal source-code assertions.
+  # shellcheck disable=SC2016
+  assert_contains "$root/scripts/backup/$lock_script" '. "$script_dir/secure-lock-file.sh"' \
+    "${lock_script%.sh}-secure-lock-sourced"
+  # These are literal source-code assertions.
+  # shellcheck disable=SC2016
+  assert_contains "$root/scripts/backup/$lock_script" 'avelren_secure_lock_acquire "$lock_file"' \
+    "${lock_script%.sh}-secure-lock-called"
+done
 assert_contains "$root/scripts/backup/restic-repository.sh" 'RESTIC_POSTGRES_TAG=postgres' postgres-restic-tag-defined
 for tagged_script in postgres-backup.sh postgres-backup-prune.sh postgres-restore-drill.sh; do
   # This is a literal source-code assertion.
@@ -195,11 +208,14 @@ log_root=
 fake_bin=
 backup_tmp=
 production_lock=
+lock_root=
 state_root=
 fixture_root=
+lock_holder_pid=
+lock_holder_release=
 safe_disposable_path() {
   case "$1" in
-    "$disposable_base"/avelren-backup-test.*|"$disposable_base"/avelren-backup-capture.*)
+    "$disposable_base"/avelren-backup-test.*|"$disposable_base"/avelren-backup-capture.*|/var/tmp/avelren-backup-lock.*)
       [ -n "$1" ] && [ "$1" != / ] && [ "$1" != "$HOME" ] && [ ! -L "$1" ] && [ -d "$1" ]
       ;;
     *) return 1 ;;
@@ -209,6 +225,17 @@ cleanup() {
   local primary_status=$? cleanup_failed=0 cleanup_state=pass final_status finish_status=0
   trap - EXIT ERR TERM
   set +e
+  if [[ "${lock_holder_pid:-}" =~ ^[0-9]+$ ]]; then
+    if [ -p "${lock_holder_release:-}" ]; then
+      # Positional expansion belongs to the bounded FIFO release helper.
+      # shellcheck disable=SC2016
+      timeout 1 bash -c 'printf "%s\n" release >"$1"' sh "$lock_holder_release" >/dev/null 2>&1 || true
+    elif [ -n "${lock_holder_release:-}" ]; then
+      : >"$lock_holder_release"
+    fi
+    kill -TERM "$lock_holder_pid" >/dev/null 2>&1 || true
+    wait "$lock_holder_pid" >/dev/null 2>&1 || true
+  fi
   if [ "$primary_status" -ne 0 ] && ! diagnostics_has_failure; then
     diagnostics_record_failure "$primary_status" "$LINENO" untrapped-exit status 0 "$primary_status"
   fi
@@ -225,6 +252,14 @@ cleanup() {
     if safe_disposable_path "$log_root"; then
       if [ "$(id -u)" -eq 0 ]; then rm -rf -- "$log_root"; else sudo -n rm -rf -- "$log_root"; fi
       [ ! -e "$log_root" ] && [ ! -L "$log_root" ] || cleanup_failed=1
+    else
+      cleanup_failed=1
+    fi
+  fi
+  if [ -n "$lock_root" ]; then
+    if safe_disposable_path "$lock_root"; then
+      if [ "$(id -u)" -eq 0 ]; then rm -rf -- "$lock_root"; else sudo -n rm -rf -- "$lock_root"; fi
+      [ ! -e "$lock_root" ] && [ ! -L "$lock_root" ] || cleanup_failed=1
     else
       cleanup_failed=1
     fi
@@ -254,20 +289,23 @@ log_root="$(mktemp -d "$disposable_base/avelren-backup-capture.XXXXXX")"
 diagnostics_set_test_id "$test_root"
 fake_bin="$test_root/bin"
 backup_tmp="$test_root/production-tmp"
-production_lock="$test_root/production-lock"
 state_root="$log_root/state"
 fixture_root="$log_root/fixtures"
-mkdir -p "$fake_bin" "$backup_tmp" "$production_lock" "$state_root" "$fixture_root"
-chmod 700 "$test_root" "$log_root" "$backup_tmp" "$production_lock" "$state_root" "$fixture_root"
 runner=()
 [ "$(id -u)" -eq 0 ] || runner=(sudo)
+lock_root="$("${runner[@]}" mktemp -d /var/tmp/avelren-backup-lock.XXXXXX)"
+production_lock="$lock_root/avelren"
+mkdir -p "$fake_bin" "$backup_tmp" "$state_root" "$fixture_root"
+chmod 700 "$test_root" "$log_root" "$backup_tmp" "$state_root" "$fixture_root"
+"${runner[@]}" mkdir -m 700 -- "$production_lock"
+"${runner[@]}" chown root:root "$lock_root" "$production_lock"
 harness_uid="$(id -u)"
 harness_gid="$(id -g)"
 production_uid="$("${runner[@]}" id -u)"
 test_root_initial_metadata="$(stat -c '%u:%g:%a' "$test_root")"
 log_root_initial_metadata="$(stat -c '%u:%g:%a' "$log_root")"
 production_tmp_initial_metadata="$(stat -c '%u:%g:%a' "$backup_tmp")"
-production_lock_initial_metadata="$(stat -c '%u:%g:%a' "$production_lock")"
+production_lock_initial_metadata="$("${runner[@]}" stat -c '%u:%g:%a' "$production_lock")"
 
 cat >"$fake_bin/docker" <<'FAKE_DOCKER'
 #!/usr/bin/env bash
@@ -494,16 +532,20 @@ cat >"$fake_bin/stat" <<'FAKE_STAT'
 #!/usr/bin/env bash
 set -eu
 target="${!#}"
+resolved_target=
+if [[ "$target" == /proc/*/fd/* ]]; then
+  resolved_target="$(readlink -f -- "$target" 2>/dev/null || true)"
+fi
 if [ "${FAKE_DUMP_STAT_FAIL:-0}" = 1 ] && [[ "$target" == *avelren-20000101T000000Z.dump ]]; then
   printf '%s\n' 'Injected host dump stat failure.' >&2
   exit 72
 fi
-if [ "${FAKE_DUMP_IDENTITY_MISMATCH:-0}" = 1 ] && [[ "$target" == /proc/*/fd/* ]]; then
+if [ "${FAKE_DUMP_IDENTITY_MISMATCH:-0}" = 1 ] && [[ "$resolved_target" == *avelren-20000101T000000Z.dump ]]; then
   printf '%s\n' 'Injected host dump identity mismatch.' >&2
   printf '%s\n' '0:0:1:0:0:600'
   exit 0
 fi
-if [ -n "${FAKE_DUMP_FD_STAT_PROOF:-}" ] && [[ "$target" == /proc/*/fd/* ]]; then
+if [ -n "${FAKE_DUMP_FD_STAT_PROOF:-}" ] && [[ "$resolved_target" == *avelren-20000101T000000Z.dump ]]; then
   printf '%s\n' reached >"$FAKE_DUMP_FD_STAT_PROOF"
 fi
 exec /usr/bin/stat "$@"
@@ -854,6 +896,107 @@ else
 fi
 assert_status 1 "$unexpected_repository_status" restic-repository-routing
 pass_case helper-entrypoints
+
+begin_case host-lock-directory-unsafe
+reset_docker_state
+unsafe_lock_directory="$lock_root/unsafe-lock-directory"
+unsafe_lock_path="$unsafe_lock_directory/backup.lock"
+assert_command_succeeds host-lock-directory-create "${runner[@]}" mkdir -m 0755 -- "$unsafe_lock_directory"
+unsafe_lock_directory_identity="$("${runner[@]}" stat -c '%d:%i:%u:%g:%a' -- "$unsafe_lock_directory")"
+unsafe_lock_directory_status=0
+if "${runner[@]}" env "${root_env[@]}" AVELREN_BACKUP_LOCK_FILE="$unsafe_lock_path" \
+    FAKE_REPOSITORY_BYTES=0 "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-lock-directory-unsafe.log" 2>&1; then
+  unsafe_lock_directory_status=0
+else
+  unsafe_lock_directory_status=$?
+fi
+assert_status 1 "$unsafe_lock_directory_status" host-lock-directory-status
+assert_contains_exact_line "$log_root/host-lock-directory-unsafe.log" \
+  'PostgreSQL backup lock directory is unsafe.' host-lock-directory-diagnostic
+assert_runner_file_absent "$docker_state" host-lock-directory-docker-not-reached
+assert_owner_mode "$unsafe_lock_directory_identity" \
+  "$("${runner[@]}" stat -c '%d:%i:%u:%g:%a' -- "$unsafe_lock_directory")" host-lock-directory-preserved
+assert_command_succeeds host-lock-directory-cleanup "${runner[@]}" rmdir -- "$unsafe_lock_directory"
+assert_runner_file_absent "$unsafe_lock_directory" host-lock-directory-cleanup-absent
+pass_case host-lock-directory-unsafe
+
+begin_case host-lock-symlink
+reset_docker_state
+hostile_lock="$production_lock/hostile.lock"
+hostile_lock_target="$fixture_root/lock-secret-target"
+printf '%s' 'lock-secret-canary' >"$hostile_lock_target"
+chmod 600 "$hostile_lock_target"
+hostile_target_identity="$(stat -c '%d:%i:%u:%g:%a:%s' "$hostile_lock_target")"
+hostile_target_hash="$(sha256sum "$hostile_lock_target" | awk '{print $1}')"
+"${runner[@]}" ln -s "$hostile_lock_target" "$hostile_lock"
+hostile_lock_status=0
+if "${runner[@]}" env "${root_env[@]}" AVELREN_BACKUP_LOCK_FILE="$hostile_lock" \
+    FAKE_REPOSITORY_BYTES=0 "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-lock-symlink.log" 2>&1; then
+  hostile_lock_status=0
+else
+  hostile_lock_status=$?
+fi
+assert_status 1 "$hostile_lock_status" host-lock-symlink-status
+assert_contains_exact_line "$log_root/host-lock-symlink.log" 'PostgreSQL backup lock file is unsafe.' host-lock-symlink-diagnostic
+assert_runner_file_absent "$docker_state" host-lock-symlink-docker-not-reached
+assert_command_succeeds host-lock-symlink-preserved "${runner[@]}" test -L "$hostile_lock"
+assert_owner_mode "$hostile_target_identity" "$(stat -c '%d:%i:%u:%g:%a:%s' "$hostile_lock_target")" host-lock-target-identity
+assert_owner_mode "$hostile_target_hash" "$(sha256sum "$hostile_lock_target" | awk '{print $1}')" host-lock-target-content
+assert_not_contains "$log_root/host-lock-symlink.log" lock-secret-canary host-lock-secret-absent
+remove_runner_or_root_fixture "$hostile_lock" host-lock-symlink-cleanup
+rm -f -- "$hostile_lock_target"
+pass_case host-lock-symlink
+
+begin_case host-lock-contention
+reset_docker_state
+lock_holder_ready="$state_root/lock-holder-ready"
+lock_holder_release="$fixture_root/lock-holder-release"
+remove_runner_or_root_fixture "$lock_holder_ready" host-lock-holder-ready-reset
+remove_runner_or_root_fixture "$lock_holder_release" host-lock-holder-release-reset
+assert_command_succeeds host-lock-holder-release-create mkfifo -- "$lock_holder_release"
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES=0 \
+  FAKE_SETUP_BARRIER_PHASE=before-creation FAKE_SETUP_READY="$lock_holder_ready" \
+  FAKE_SETUP_RELEASE="$lock_holder_release" AVELREN_BACKUP_DOCKER_TIMEOUT=10 \
+  "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-lock-holder.log" 2>&1 &
+lock_holder_pid=$!
+wait_for_root_file "$lock_holder_ready" "$lock_holder_pid" || fail_case host-lock-holder-ready present absent
+holder_rclone_hash="$(sha256sum "$rclone_calls" | awk '{print $1}')"
+holder_restic_hash="$(sha256sum "$restic_calls" | awk '{print $1}')"
+assert_runner_file_absent "$docker_state" host-lock-holder-operation-not-created
+lock_contender_status=0
+if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES=0 \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-lock-contention.log" 2>&1; then
+  lock_contender_status=0
+else
+  lock_contender_status=$?
+fi
+assert_status 1 "$lock_contender_status" host-lock-contention-status
+assert_contains_exact_line "$log_root/host-lock-contention.log" 'Another PostgreSQL backup is running.' host-lock-contention-diagnostic
+assert_owner_mode "$holder_rclone_hash" "$(sha256sum "$rclone_calls" | awk '{print $1}')" host-lock-contention-rclone-not-reached
+assert_owner_mode "$holder_restic_hash" "$(sha256sum "$restic_calls" | awk '{print $1}')" host-lock-contention-restic-not-reached
+assert_runner_file_absent "$docker_state" host-lock-contention-operation-not-created
+# Positional expansion belongs to the bounded FIFO release helper.
+# shellcheck disable=SC2016
+assert_command_succeeds host-lock-holder-release timeout 3 bash -c 'printf "%s\n" release >"$1"' sh "$lock_holder_release"
+wait_for_wrapper_exit "$lock_holder_pid" || fail_case host-lock-holder-exit exited running
+lock_holder_status=0
+if wait "$lock_holder_pid"; then lock_holder_status=0; else lock_holder_status=$?; fi
+lock_holder_pid=
+assert_status 1 "$lock_holder_status" host-lock-holder-status
+remove_runner_or_root_fixture "$lock_holder_ready" host-lock-holder-ready-cleanup
+remove_runner_or_root_fixture "$lock_holder_release" host-lock-holder-release-cleanup
+lock_holder_release=
+lock_release_status=0
+if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES=0 FAKE_EFFECTIVE_TMPFS_STATUS=1 \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-lock-release.log" 2>&1; then
+  lock_release_status=0
+else
+  lock_release_status=$?
+fi
+assert_status 1 "$lock_release_status" host-lock-release-status
+assert_contains_exact_line "$log_root/host-lock-release.log" 'PostgreSQL backup runtime effective tmpfs mount is unsafe.' host-lock-release-reached
+assert_runner_file_absent "$docker_state" host-lock-release-operation-not-created
+pass_case host-lock-contention
 
 below_warning=$((12 * 1024 * 1024 * 1024 - 1))
 at_warning=$((12 * 1024 * 1024 * 1024))
