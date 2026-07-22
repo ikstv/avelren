@@ -279,7 +279,7 @@ at_hard_stop=$((14 * 1024 * 1024 * 1024))
 assert_tmpfs_rejected() {
   local case_name="$1" expected_message="$2"
   shift 2
-  rm -f "$test_root/docker-state"
+  "${runner[@]}" rm -f "$test_root/docker-state"
   set +e
   "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$@" \
     "$root/scripts/backup/postgres-backup.sh" >"$log_root/tmpfs-$case_name.log" 2>&1
@@ -350,12 +350,12 @@ assert_host_dump_rejected() {
   local case_name="$1"
   local fixed_tmp="$backup_tmp/fixed-$case_name"
   local target="$fixed_tmp/avelren-20000101T000000Z.dump"
-  mkdir -m 700 "$fixed_tmp"
+  "${runner[@]}" mkdir -m 700 "$fixed_tmp"
   case "$case_name" in
-    symlink) ln -s /dev/null "$target" ;;
-    fifo) mkfifo "$target" ;;
-    directory) mkdir "$target" ;;
-    regular) touch "$target"; chmod 600 "$target" ;;
+    symlink) "${runner[@]}" ln -s /dev/null "$target" ;;
+    fifo) "${runner[@]}" mkfifo "$target" ;;
+    directory) "${runner[@]}" mkdir "$target" ;;
+    regular) "${runner[@]}" touch "$target"; "${runner[@]}" chmod 600 "$target" ;;
     *) exit 1 ;;
   esac
   set +e
@@ -382,7 +382,7 @@ assert_host_dump_rejected directory
 assert_host_dump_rejected regular
 for injected_failure in FAKE_DUMP_CHMOD_FAIL FAKE_DUMP_STAT_FAIL; do
   fixed_tmp="$backup_tmp/fixed-$injected_failure"
-  mkdir -m 700 "$fixed_tmp"
+  "${runner[@]}" mkdir -m 700 "$fixed_tmp"
   set +e
   "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" "$injected_failure=1" \
     "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-$injected_failure.log" 2>&1

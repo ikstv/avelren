@@ -113,7 +113,7 @@ runtime_root=/run/avelren-backup
 "${compose[@]}" exec -T -u 0 postgres sh -s -- "$runtime_root" <<'EOF'
 set -eu
 target="$1"
-awk -v target="$target" '
+if ! awk -v target="$target" '
   function has(options, expected,  count, item) {
     count = split(options, item, ",")
     for (i = 1; i <= count; i++) if (item[i] == expected) return 1
@@ -128,6 +128,11 @@ awk -v target="$target" '
   }
   END { exit found == 1 ? 0 : 1 }
 ' /proc/self/mountinfo
+then
+  printf '%s\n' 'Effective PostgreSQL backup tmpfs mount validation failed.' >&2
+  awk -v target="$target" '$5 == target { print }' /proc/self/mountinfo >&2
+  exit 1
+fi
 [ "$(stat -c '%u:%g:%a' "$target")" = '0:0:700' ]
 EOF
 
