@@ -2,54 +2,156 @@
 set -Eeuo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-for script in scripts/backup/postgres-backup.sh scripts/backup/postgres-restore-drill.sh scripts/backup/postgres-backup-init.sh scripts/backup/postgres-backup-repo-check.sh scripts/backup/postgres-backup-prune.sh; do
-  test -x "$root/$script"
-  # These are literal source-code assertions.
-  # shellcheck disable=SC2016
-  grep -Fq '. "$script_dir/restic-password-file.sh"' "$root/$script"
-  # These are literal source-code assertions.
-  # shellcheck disable=SC2016
-  grep -Fq 'validate_restic_password_file "$password_file"' "$root/$script"
-  # These are literal source-code assertions.
-  # shellcheck disable=SC2016
-  grep -Fq '. "$script_dir/restic-repository.sh"' "$root/$script"
-  # These are literal source-code assertions.
-  # shellcheck disable=SC2016
-  grep -Fq 'configure_restic_repository "$repo"' "$root/$script"
-done
-test -r "$root/scripts/backup/restic-password-file.sh"
-test -r "$root/scripts/backup/restic-repository.sh"
-test -r "$root/scripts/backup/postgres-tcp-dump.sh"
-test -r "$root/scripts/backup/postgres-backup-control.sh"
-grep -Fq '14 * 1024 * 1024 * 1024' "$root/scripts/backup/postgres-backup.sh"
-grep -Fq 'keep-daily 7' "$root/scripts/backup/postgres-backup-prune.sh"
-grep -Fq 'keep-weekly 4' "$root/scripts/backup/postgres-backup-prune.sh"
-grep -Fq 'keep-monthly 3' "$root/scripts/backup/postgres-backup-prune.sh"
-if grep -Eq 'dbname[ =]+avelren.*(dropdb|DROP DATABASE)' "$root/scripts/backup/postgres-restore-drill.sh"; then
-  exit 1
+diagnostics_helper="$root/scripts/ci/postgres-backup-diagnostics.sh"
+# Resolved relative to the repository root.
+# shellcheck disable=SC1090
+. "$diagnostics_helper"
+
+if [ "${AVELREN_DIAGNOSTICS_SELF_TEST:-0}" = 1 ]; then
+  diagnostics_self_test "$root/scripts/ci/postgres-backup-test.sh"
+  exit 0
 fi
 
+if [ -n "${AVELREN_DIAGNOSTICS_SELF_TEST_CHILD:-}" ]; then
+  case_specs=('diagnostics-self-test|intentional sanitized diagnostic failure')
+else
+  case_specs=(
+    'static-contract|backup script contracts and retention policy'
+    'runtime-nonroot-guard|non-root backup execution is rejected'
+    'runtime-root-runner|root runner dependency is available'
+    'harness-setup|isolated fake command and fixture setup'
+    'password-validator|Restic password file validation matrix'
+    'repository-validator|Restic repository validation matrix'
+    'helper-entrypoints|backup helper entrypoints and routing'
+    'tmpfs-reordered|reordered secure tmpfs options are accepted'
+    'tmpfs-canonical-mode|Docker canonical mode 700 is accepted'
+    'tmpfs-missing-noexec|missing noexec is rejected'
+    'tmpfs-missing-nosuid|missing nosuid is rejected'
+    'tmpfs-missing-nodev|missing nodev is rejected'
+    'tmpfs-wrong-mode|unsafe tmpfs mode is rejected'
+    'tmpfs-wrong-uid|unsafe tmpfs uid is rejected'
+    'tmpfs-wrong-gid|unsafe tmpfs gid is rejected'
+    'tmpfs-deceptive-substring|deceptive tmpfs values are rejected'
+    'tmpfs-contradictory-exec|contradictory exec option is rejected'
+    'tmpfs-malformed-boolean|malformed tmpfs boolean is rejected'
+    'tmpfs-effective-not-tmpfs|unsafe effective mount is rejected'
+    'historical-nonempty|historical non-empty-only check remains proven unsafe'
+    'host-dump-mode|host dump is root-owned mode 0600'
+    'host-existing-symlink|pre-existing dump symlink is rejected'
+    'host-existing-fifo|pre-existing dump FIFO is rejected'
+    'host-existing-directory|pre-existing dump directory is rejected'
+    'host-existing-regular|pre-existing dump regular file is rejected'
+    'host-tmpdir-chmod-failure|temporary directory chmod failure is isolated'
+    'host-dump-stat-failure|host dump stat failure is isolated'
+    'host-partial-stream|partial dump stream is cleaned up'
+    'repository-below-warning|repository below warning threshold succeeds'
+    'runtime-stale-state|stale runtime state is rejected'
+    'operation-collision-retry|operation collision preserves existing state'
+    'repository-warning|repository warning threshold emits warning'
+    'repository-hard-stop|repository hard limit stops backup'
+    'restic-failure|Restic failure preserves cleanup and status'
+    'restore-database-guard|restore drill rejects production database name change'
+    'harness-cleanup|root-owned harness fixtures are removed'
+  )
+fi
+diagnostics_init "${case_specs[@]}"
+
+if [ "${AVELREN_DIAGNOSTICS_SELF_TEST_CHILD:-}" = fail ]; then
+  diagnostics_set_test_id diagnostics-self-test
+  begin_case diagnostics-self-test
+  diagnostics_set_assertion intentional-self-test
+  intentional_diagnostic_failure() { return 86; }
+  intentional_diagnostic_failure
+elif [ "${AVELREN_DIAGNOSTICS_SELF_TEST_CHILD:-}" = redact ]; then
+  diagnostics_set_test_id diagnostics-self-test
+  begin_case diagnostics-self-test
+  fail_case intentional-self-test-redaction rejected "${AVELREN_DIAGNOSTICS_SELF_TEST_SECRET:-missing}"
+elif [ "${AVELREN_DIAGNOSTICS_SELF_TEST_CHILD:-}" = timeout ]; then
+  diagnostics_set_test_id diagnostics-self-test
+  begin_case diagnostics-self-test
+  kill -TERM "$$"
+  fail_case timeout-signal-delivery pass failed
+elif [ "${AVELREN_DIAGNOSTICS_SELF_TEST_CHILD:-}" = pass ]; then
+  diagnostics_set_test_id diagnostics-self-test
+  begin_case diagnostics-self-test
+  pass_case diagnostics-self-test
+  exit 0
+fi
+
+begin_case static-contract
+for script in scripts/backup/postgres-backup.sh scripts/backup/postgres-restore-drill.sh scripts/backup/postgres-backup-init.sh scripts/backup/postgres-backup-repo-check.sh scripts/backup/postgres-backup-prune.sh; do
+  script_id="${script##*/}"
+  script_id="${script_id%.sh}"
+  assert_command_succeeds "${script_id}-executable" test -x "$root/$script"
+  # These are literal source-code assertions.
+  # shellcheck disable=SC2016
+  assert_contains "$root/$script" '. "$script_dir/restic-password-file.sh"' "${script_id}-password-validator-sourced"
+  # These are literal source-code assertions.
+  # shellcheck disable=SC2016
+  assert_contains "$root/$script" 'validate_restic_password_file "$password_file"' "${script_id}-password-validator-called"
+  # These are literal source-code assertions.
+  # shellcheck disable=SC2016
+  assert_contains "$root/$script" '. "$script_dir/restic-repository.sh"' "${script_id}-repository-validator-sourced"
+  # These are literal source-code assertions.
+  # shellcheck disable=SC2016
+  assert_contains "$root/$script" 'configure_restic_repository "$repo"' "${script_id}-repository-validator-called"
+done
+for support_file in restic-password-file.sh restic-repository.sh postgres-tcp-dump.sh postgres-backup-control.sh; do
+  support_id="${support_file%.sh}"
+  assert_command_succeeds "${support_id}-readable" test -r "$root/scripts/backup/$support_file"
+done
+assert_contains "$root/scripts/backup/postgres-backup.sh" '14 * 1024 * 1024 * 1024' hard-limit-contract
+assert_contains "$root/scripts/backup/postgres-backup-prune.sh" 'keep-daily 7' daily-retention-contract
+assert_contains "$root/scripts/backup/postgres-backup-prune.sh" 'keep-weekly 4' weekly-retention-contract
+assert_contains "$root/scripts/backup/postgres-backup-prune.sh" 'keep-monthly 3' monthly-retention-contract
+restore_drop_status=0
+if grep -Eq 'dbname[ =]+avelren.*(dropdb|DROP DATABASE)' "$root/scripts/backup/postgres-restore-drill.sh" 2>/dev/null; then
+  restore_drop_status=0
+else
+  restore_drop_status=$?
+fi
+assert_status 1 "$restore_drop_status" restore-drop-guard
+pass_case static-contract
+
 if [ "$(id -u)" -ne 0 ]; then
+  begin_case runtime-nonroot-guard
   nonroot_log="$(mktemp "${RUNNER_TEMP:-/tmp}/avelren-backup-nonroot.XXXXXX")"
   nonroot_status=0
-  env AVELREN_RCLONE_REMOTE=test "$root/scripts/backup/postgres-backup.sh" >"$nonroot_log" 2>&1 || nonroot_status=$?
-  [ "$nonroot_status" -ne 0 ]
-  grep -Fq 'This backup must run as root.' "$nonroot_log"
+  if env AVELREN_RCLONE_REMOTE=test "$root/scripts/backup/postgres-backup.sh" >"$nonroot_log" 2>&1; then
+    nonroot_status=0
+  else
+    nonroot_status=$?
+  fi
+  nonroot_marker_status=0
+  if grep -Fq 'This backup must run as root.' "$nonroot_log" 2>/dev/null; then
+    nonroot_marker_status=0
+  else
+    nonroot_marker_status=$?
+  fi
+  diagnostics_set_assertion nonroot-log-cleanup
   rm -f -- "$nonroot_log"
+  assert_nonzero_status "$nonroot_status" nonroot-status
+  assert_status 0 "$nonroot_marker_status" nonroot-diagnostic
+  pass_case runtime-nonroot-guard
+else
+  skip_case runtime-nonroot-guard already-root
 fi
 
 if [ "$(id -u)" -ne 0 ] && { ! command -v sudo >/dev/null 2>&1 || ! sudo -n true >/dev/null 2>&1; }; then
+  skip_case runtime-root-runner root-runner-unavailable
+  skip_remaining_cases root-runner-unavailable
   printf '%s\n' 'Runtime failure-path tests skipped: root runner is unavailable.'
   exit 0
 fi
 
+begin_case runtime-root-runner
+pass_case runtime-root-runner
+
 disposable_base="${RUNNER_TEMP:-/tmp}"
-test_root="$(mktemp -d "$disposable_base/avelren-backup-test.XXXXXX")"
-log_root="$(mktemp -d "$disposable_base/avelren-backup-capture.XXXXXX")"
-fake_bin="$test_root/bin"
-backup_tmp="$test_root/backup-tmp"
-mkdir -p "$fake_bin" "$backup_tmp"
-chmod 700 "$test_root" "$log_root" "$backup_tmp"
+test_root=
+log_root=
+fake_bin=
+backup_tmp=
 safe_disposable_path() {
   case "$1" in
     "$disposable_base"/avelren-backup-test.*|"$disposable_base"/avelren-backup-capture.*)
@@ -59,15 +161,56 @@ safe_disposable_path() {
   esac
 }
 cleanup() {
-  safe_disposable_path "$test_root" || exit 1
-  safe_disposable_path "$log_root" || exit 1
-  if [ "$(id -u)" -eq 0 ]; then
-    rm -rf -- "$test_root" "$log_root"
-  else
-    sudo rm -rf -- "$test_root" "$log_root"
+  local primary_status=$? cleanup_failed=0 cleanup_state=pass final_status finish_status=0
+  trap - EXIT ERR TERM
+  set +e
+  if [ "$primary_status" -ne 0 ] && ! diagnostics_has_failure; then
+    diagnostics_record_failure "$primary_status" "$LINENO" untrapped-exit status 0 "$primary_status"
   fi
+  begin_case harness-cleanup
+  if [ -n "$test_root" ]; then
+    if safe_disposable_path "$test_root"; then
+      if [ "$(id -u)" -eq 0 ]; then rm -rf -- "$test_root"; else sudo -n rm -rf -- "$test_root"; fi
+      [ ! -e "$test_root" ] && [ ! -L "$test_root" ] || cleanup_failed=1
+    else
+      cleanup_failed=1
+    fi
+  fi
+  if [ -n "$log_root" ]; then
+    if safe_disposable_path "$log_root"; then
+      if [ "$(id -u)" -eq 0 ]; then rm -rf -- "$log_root"; else sudo -n rm -rf -- "$log_root"; fi
+      [ ! -e "$log_root" ] && [ ! -L "$log_root" ] || cleanup_failed=1
+    else
+      cleanup_failed=1
+    fi
+  fi
+  if [ "$cleanup_failed" -eq 0 ]; then
+    pass_case harness-cleanup
+  else
+    cleanup_state=fail
+    if ! diagnostics_has_failure; then
+      diagnostics_set_assertion cleanup-state
+      diagnostics_record_failure 1 "$LINENO" cleanup-state assertion pass failed
+    else
+      diagnostics_close_failed_cleanup
+    fi
+  fi
+  diagnostics_finish "$primary_status" "$cleanup_state" || finish_status=$?
+  final_status="$primary_status"
+  if [ "$final_status" -eq 0 ] && [ "$cleanup_failed" -ne 0 ]; then final_status=1; fi
+  if [ "$final_status" -eq 0 ] && [ "$finish_status" -ne 0 ]; then final_status="$finish_status"; fi
+  exit "$final_status"
 }
 trap cleanup EXIT
+
+begin_case harness-setup
+test_root="$(mktemp -d "$disposable_base/avelren-backup-test.XXXXXX")"
+log_root="$(mktemp -d "$disposable_base/avelren-backup-capture.XXXXXX")"
+diagnostics_set_test_id "$test_root"
+fake_bin="$test_root/bin"
+backup_tmp="$test_root/backup-tmp"
+mkdir -p "$fake_bin" "$backup_tmp"
+chmod 700 "$test_root" "$log_root" "$backup_tmp"
 
 cat >"$fake_bin/docker" <<'FAKE_DOCKER'
 #!/usr/bin/env bash
@@ -211,6 +354,9 @@ root_env+=("FAKE_DOCKER_STATE=$test_root/docker-state")
 root_env+=("FAKE_DUMP_MODE=$log_root/dump-mode")
 runner=()
 [ "$(id -u)" -eq 0 ] || runner=(sudo)
+pass_case harness-setup
+
+begin_case password-validator
 validator="$root/scripts/backup/restic-password-file.sh"
 validator_fixture="$test_root/validator-password"
 printf '%s' 'validator-fixture' >"$validator_fixture"
@@ -221,13 +367,16 @@ run_validator() {
   "${runner[@]}" env VALIDATOR="$validator" PASSWORD_FILE="$1" bash -c '. "$VALIDATOR"; validate_restic_password_file "$PASSWORD_FILE"'
 }
 expect_validator_pass() {
+  diagnostics_set_assertion "password-mode-$1-fixture"
   "${runner[@]}" chmod "$1" "$validator_fixture"
+  diagnostics_set_assertion "password-mode-$1-accepted"
   run_validator "$validator_fixture"
 }
 expect_validator_fail() {
+  diagnostics_set_assertion "password-mode-$1-fixture"
   "${runner[@]}" chmod "$1" "$validator_fixture"
   if run_validator "$validator_fixture" >/dev/null 2>&1; then
-    exit 1
+    fail_case "password-mode-$1-rejected" rejected accepted
   fi
 }
 expect_validator_pass 400
@@ -242,7 +391,7 @@ else
   sudo chown "$(id -u):$(id -g)" "$validator_fixture"
 fi
 if run_validator "$validator_fixture" >/dev/null 2>&1; then
-  exit 1
+  fail_case password-owner-rejected rejected accepted
 fi
 "${runner[@]}" chown root:root "$validator_fixture"
 empty_fixture="$test_root/empty-password"
@@ -250,145 +399,228 @@ empty_fixture="$test_root/empty-password"
 "${runner[@]}" chown root:root "$empty_fixture"
 "${runner[@]}" chmod 400 "$empty_fixture"
 if run_validator "$empty_fixture" >/dev/null 2>&1; then
-  exit 1
+  fail_case empty-password-rejected rejected accepted
 fi
 symlink_fixture="$test_root/symlink-password"
 "${runner[@]}" ln -s "$validator_fixture" "$symlink_fixture"
 if run_validator "$symlink_fixture" >/dev/null 2>&1; then
-  exit 1
+  fail_case symlink-password-rejected rejected accepted
 fi
+pass_case password-validator
+
+begin_case repository-validator
 repository_validator="$root/scripts/backup/restic-repository.sh"
 run_repository_validator() {
   # Expansion belongs to the isolated bash process.
   # shellcheck disable=SC2016
   env VALIDATOR="$repository_validator" REPOSITORY="$1" bash -c '. "$VALIDATOR"; configure_restic_repository "$REPOSITORY"; test "$RESTIC_REPOSITORY_URL" = "rclone:test-remote:Avelren Backups/restic"; test "$RCLONE_REPOSITORY_PATH" = "test-remote:Avelren Backups/restic"'
 }
+diagnostics_set_assertion valid-repository-accepted
 run_repository_validator 'rclone:test-remote:Avelren Backups/restic'
-for invalid_repository in 's3:test-remote:Avelren Backups/restic' 'rclone:rclone:test-remote:Avelren Backups/restic' 'rclone::Avelren Backups/restic' 'rclone:test-remote:'; do
-  if run_repository_validator "$invalid_repository" >/dev/null 2>&1; then exit 1; fi
+invalid_repository_specs=(
+  'scheme|s3:test-remote:Avelren Backups/restic'
+  'double-prefix|rclone:rclone:test-remote:Avelren Backups/restic'
+  'missing-remote|rclone::Avelren Backups/restic'
+  'missing-path|rclone:test-remote:'
+)
+for invalid_repository_spec in "${invalid_repository_specs[@]}"; do
+  invalid_repository_id="${invalid_repository_spec%%|*}"
+  invalid_repository="${invalid_repository_spec#*|}"
+  if run_repository_validator "$invalid_repository" >/dev/null 2>&1; then fail_case "repository-$invalid_repository_id-rejected" rejected accepted; fi
 done
-if run_repository_validator $'rclone:test-remote:Avelren Backups/restic\ninvalid' >/dev/null 2>&1; then exit 1; fi
-if run_repository_validator $'rclone:test-remote:Avelren Backups/restic\tinvalid' >/dev/null 2>&1; then exit 1; fi
-backup_tmp_is_empty() { [ -z "$("${runner[@]}" find "$backup_tmp" -mindepth 1 -print -quit)" ]; }
+if run_repository_validator $'rclone:test-remote:Avelren Backups/restic\ninvalid' >/dev/null 2>&1; then fail_case newline-repository-rejected rejected accepted; fi
+if run_repository_validator $'rclone:test-remote:Avelren Backups/restic\tinvalid' >/dev/null 2>&1; then fail_case tab-repository-rejected rejected accepted; fi
+pass_case repository-validator
+
+assert_backup_tmp_empty() {
+  local output='' status=0
+  diagnostics_set_assertion "$1"
+  if output="$("${runner[@]}" find "$backup_tmp" -mindepth 1 -print -quit)"; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_status 0 "$status" "$1-find-status"
+  if [ -n "$output" ]; then fail_case "$1" empty entries-present; fi
+}
+assert_runner_file_absent() {
+  local path="$1" assertion="$2" status=0
+  # Positional expansion belongs to the isolated root-capable bash process.
+  # shellcheck disable=SC2016
+  if "${runner[@]}" bash -c 'if [ -e "$1" ] || [ -L "$1" ]; then exit 1; fi' _ "$path"; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_status 0 "$status" "$assertion"
+}
 capture_is_runner_readable() { [ -r "$log_root" ] && [ -x "$log_root" ] && [ -f "$1" ] && [ -r "$1" ]; }
+
+begin_case helper-entrypoints
 printf '%s\n' 'test' >"$test_root/env"
 printf '%s\n' 'test' >"$test_root/compose.yml"
 
+diagnostics_set_assertion backup-init-success
 "${runner[@]}" env "${root_env[@]}" "$root/scripts/backup/postgres-backup-init.sh" >/dev/null
+diagnostics_set_assertion repository-check-success
 "${runner[@]}" env "${root_env[@]}" "$root/scripts/backup/postgres-backup-repo-check.sh" >/dev/null
+diagnostics_set_assertion prune-success
 "${runner[@]}" env "${root_env[@]}" "$root/scripts/backup/postgres-backup-prune.sh" >/dev/null
-grep -Fxq 'lsd test-remote:' "$rclone_calls"
-grep -Fxq 'lsf test-remote:Avelren Backups' "$rclone_calls"
-grep -Fxq 'size --json test-remote:Avelren Backups/restic' "$rclone_calls"
-if grep -Fq 'rclone:test-remote:' "$rclone_calls"; then exit 1; fi
-if grep -Fvxq 'rclone:test-remote:Avelren Backups/restic' "$restic_repositories"; then exit 1; fi
+assert_contains_exact_line "$rclone_calls" 'lsd test-remote:' init-routing
+assert_contains_exact_line "$rclone_calls" 'lsf test-remote:Avelren Backups' repository-routing
+assert_contains_exact_line "$rclone_calls" 'size --json test-remote:Avelren Backups/restic' size-routing
+assert_not_contains "$rclone_calls" 'rclone:test-remote:' rclone-url-not-forwarded
+unexpected_repository_status=0
+if grep -Fvxq 'rclone:test-remote:Avelren Backups/restic' "$restic_repositories" 2>/dev/null; then
+  unexpected_repository_status=0
+else
+  unexpected_repository_status=$?
+fi
+assert_status 1 "$unexpected_repository_status" restic-repository-routing
+pass_case helper-entrypoints
 
 below_warning=$((12 * 1024 * 1024 * 1024 - 1))
 at_warning=$((12 * 1024 * 1024 * 1024))
 at_hard_stop=$((14 * 1024 * 1024 * 1024))
 
 assert_tmpfs_rejected() {
-  local case_name="$1" expected_message="$2"
-  shift 2
+  local case_id="$1" case_name="$2" expected_message="$3"
+  shift 3
+  begin_case "$case_id"
   "${runner[@]}" rm -f "$test_root/docker-state"
   local status=0
   if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$@" \
     "$root/scripts/backup/postgres-backup.sh" >"$log_root/tmpfs-$case_name.log" 2>&1; then
-    :
+    status=0
   else
     status=$?
   fi
-  [ "$status" -ne 0 ]
-  grep -Fq "$expected_message" "$log_root/tmpfs-$case_name.log"
-  [ ! -e "$test_root/docker-state" ]
-  backup_tmp_is_empty
-  if grep -Fq 'fixture-password' "$log_root/tmpfs-$case_name.log"; then exit 1; fi
+  assert_nonzero_status "$status" tmpfs-rejection-status
+  assert_contains "$log_root/tmpfs-$case_name.log" "$expected_message" tmpfs-rejection-diagnostic
+  assert_runner_file_absent "$test_root/docker-state" operation-not-created
+  assert_backup_tmp_empty tmpfs-rejection-cleanup
+  assert_not_contains "$log_root/tmpfs-$case_name.log" fixture-password secret-absent
+  pass_case "$case_id"
 }
 
 # Required declared tokens are order-independent and harmless additions remain
 # compatible, but each missing, deceptive, malformed, or contradictory value
 # must fail before operation creation.
+begin_case tmpfs-reordered
+diagnostics_set_assertion backup-command-success
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
   FAKE_TMPFS_OPTIONS='gid=0,size=16m,nodev,rw,mode=0700,noexec,uid=0,nosuid' \
   "$root/scripts/backup/postgres-backup.sh" >"$log_root/tmpfs-reordered.log" 2>&1
-backup_tmp_is_empty
+assert_backup_tmp_empty tmpfs-reordered-cleanup
+pass_case tmpfs-reordered
+
+begin_case tmpfs-canonical-mode
+diagnostics_set_assertion backup-command-success
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
   FAKE_TMPFS_OPTIONS='rw,noexec,nosuid,nodev,mode=700,uid=0,gid=0,size=16m' \
   "$root/scripts/backup/postgres-backup.sh" >"$log_root/tmpfs-canonical-mode.log" 2>&1
-backup_tmp_is_empty
+assert_backup_tmp_empty tmpfs-canonical-cleanup
+pass_case tmpfs-canonical-mode
+
 for missing_option in noexec nosuid nodev; do
   options='rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0'
   options="${options//$missing_option,/}"
-  assert_tmpfs_rejected "missing-$missing_option" 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+  assert_tmpfs_rejected "tmpfs-missing-$missing_option" "missing-$missing_option" 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
     "FAKE_TMPFS_OPTIONS=$options"
 done
-assert_tmpfs_rejected wrong-mode 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+assert_tmpfs_rejected tmpfs-wrong-mode wrong-mode 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
   'FAKE_TMPFS_OPTIONS=rw,noexec,nosuid,nodev,mode=07000,uid=0,gid=0'
-assert_tmpfs_rejected wrong-uid 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+assert_tmpfs_rejected tmpfs-wrong-uid wrong-uid 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
   'FAKE_TMPFS_OPTIONS=rw,noexec,nosuid,nodev,mode=0700,uid=1,gid=0'
-assert_tmpfs_rejected wrong-gid 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+assert_tmpfs_rejected tmpfs-wrong-gid wrong-gid 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
   'FAKE_TMPFS_OPTIONS=rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=1'
-assert_tmpfs_rejected deceptive-substring 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+assert_tmpfs_rejected tmpfs-deceptive-substring deceptive-substring 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
   'FAKE_TMPFS_OPTIONS=rw,noexec,nosuid,nodev,mode=07000,uid=00,gid=00'
-assert_tmpfs_rejected contradictory-exec 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+assert_tmpfs_rejected tmpfs-contradictory-exec contradictory-exec 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
   'FAKE_TMPFS_OPTIONS=rw,noexec,exec,nosuid,nodev,mode=0700,uid=0,gid=0'
-assert_tmpfs_rejected malformed-boolean 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+assert_tmpfs_rejected tmpfs-malformed-boolean malformed-boolean 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
   'FAKE_TMPFS_OPTIONS=rw,noexec=1,nosuid,nodev,mode=0700,uid=0,gid=0'
-assert_tmpfs_rejected effective-not-tmpfs 'PostgreSQL backup runtime effective tmpfs mount is unsafe.' \
+assert_tmpfs_rejected tmpfs-effective-not-tmpfs effective-not-tmpfs 'PostgreSQL backup runtime effective tmpfs mount is unsafe.' \
   'FAKE_EFFECTIVE_TMPFS_STATUS=1'
 
 # The historical non-empty HostConfig check accepts the missing-noexec case;
 # retain this proof so the negative matrix cannot silently regress to it.
+begin_case historical-nonempty
 legacy_backup="$test_root/legacy-postgres-backup.sh"
+history_file="$log_root/history-list"
+legacy_probe="$log_root/legacy-probe"
 legacy_ref=
+history_status=0
+if git -C "$root" rev-list HEAD >"$history_file"; then
+  history_status=0
+else
+  history_status=$?
+fi
+assert_status 0 "$history_status" history-list
 while read -r candidate; do
-  if git -C "$root" show "$candidate:scripts/backup/postgres-backup.sh" 2>/dev/null \
-      | grep -Fq 'PostgreSQL backup runtime is not tmpfs-backed.'; then
+  if git -C "$root" show "$candidate:scripts/backup/postgres-backup.sh" >"$legacy_probe" 2>/dev/null \
+      && grep -Fq 'PostgreSQL backup runtime is not tmpfs-backed.' "$legacy_probe" 2>/dev/null; then
     legacy_ref="$candidate"
     break
   fi
-done < <(git -C "$root" rev-list HEAD)
-[ -n "$legacy_ref" ]
-git -C "$root" show "$legacy_ref:scripts/backup/postgres-backup.sh" | "${runner[@]}" tee "$legacy_backup" >/dev/null
+done <"$history_file"
+assert_nonempty "$legacy_ref" legacy-fixture-found
+legacy_materialize_status=0
+if git -C "$root" show "$legacy_ref:scripts/backup/postgres-backup.sh" >"$legacy_probe"; then
+  legacy_materialize_status=0
+else
+  legacy_materialize_status=$?
+fi
+assert_status 0 "$legacy_materialize_status" legacy-fixture-materialized
+assert_command_succeeds legacy-fixture-copied "${runner[@]}" cp "$legacy_probe" "$legacy_backup"
 "${runner[@]}" cp "$root/scripts/backup/restic-password-file.sh" "$root/scripts/backup/restic-repository.sh" \
   "$root/scripts/backup/postgres-tcp-dump.sh" "$root/scripts/backup/postgres-backup-control.sh" "$test_root/"
 "${runner[@]}" chmod 700 "$legacy_backup"
+diagnostics_set_assertion legacy-backup-command-success
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
   FAKE_TMPFS_OPTIONS='rw,nosuid,nodev,mode=0700,uid=0,gid=0' \
   "$legacy_backup" >"$log_root/legacy-nonempty-only.log" 2>&1
-grep -Fq 'PostgreSQL backup completed.' "$log_root/legacy-nonempty-only.log"
-backup_tmp_is_empty
+assert_contains "$log_root/legacy-nonempty-only.log" 'PostgreSQL backup completed.' legacy-backup-completed
+assert_backup_tmp_empty legacy-backup-cleanup
+pass_case historical-nonempty
 
 assert_host_dump_rejected() {
-  local case_name="$1"
+  local case_name="$1" case_id="host-existing-$1" status=0
   local fixed_tmp="$backup_tmp/fixed-$case_name"
   local target="$fixed_tmp/avelren-20000101T000000Z.dump"
+  begin_case "$case_id"
   "${runner[@]}" mkdir -m 700 "$fixed_tmp"
   case "$case_name" in
     symlink) "${runner[@]}" ln -s /dev/null "$target" ;;
     fifo) "${runner[@]}" mkfifo "$target" ;;
     directory) "${runner[@]}" mkdir "$target" ;;
     regular) "${runner[@]}" touch "$target"; "${runner[@]}" chmod 600 "$target" ;;
-    *) exit 1 ;;
+    *) fail_case host-fixture-kind known unknown ;;
   esac
-  set +e
   umask 0022
-  "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" \
-    "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-$case_name.log" 2>&1
-  local status=$?
-  set -e
-  [ "$status" -ne 0 ]
-  grep -Fq 'Could not create secure host dump file.' "$log_root/host-$case_name.log"
-  [ ! -e "$fixed_tmp" ]
-  backup_tmp_is_empty
+  if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" \
+      "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-$case_name.log" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_nonzero_status "$status" existing-host-dump-status
+  assert_contains "$log_root/host-$case_name.log" 'Could not create secure host dump file.' existing-host-dump-diagnostic
+  assert_runner_file_absent "$fixed_tmp" existing-host-dump-removed
+  assert_backup_tmp_empty existing-host-dump-cleanup
+  pass_case "$case_id"
 }
 
+begin_case host-dump-mode
 rm -f "$log_root/dump-mode"
 umask 0022
+diagnostics_set_assertion backup-command-success
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
   "$root/scripts/backup/postgres-backup.sh" >"$log_root/explicit-dump-mode.log" 2>&1
-[ "$("${runner[@]}" cat "$log_root/dump-mode")" = '0:0:600' ]
-backup_tmp_is_empty
+assert_owner_mode '0:0:600' "$("${runner[@]}" cat "$log_root/dump-mode")" host-dump-owner-mode
+assert_backup_tmp_empty host-dump-mode-cleanup
+pass_case host-dump-mode
+
 assert_host_dump_rejected symlink
 assert_host_dump_rejected fifo
 assert_host_dump_rejected directory
@@ -400,103 +632,141 @@ for injected_failure in FAKE_TMPDIR_CHMOD_FAIL FAKE_DUMP_STAT_FAIL; do
   fixed_tmp="$backup_tmp/fixed-$injected_failure"
   case "$injected_failure" in
     FAKE_TMPDIR_CHMOD_FAIL)
+      injected_case=host-tmpdir-chmod-failure
       expected_status=71
       expected_marker='Injected temporary directory chmod failure.'
       ;;
     FAKE_DUMP_STAT_FAIL)
+      injected_case=host-dump-stat-failure
       expected_status=1
       expected_marker='Injected host dump stat failure.'
       ;;
-    *) exit 1 ;;
+    *) fail_case injected-failure-kind known unknown ;;
   esac
+  begin_case "$injected_case"
   "${runner[@]}" mkdir -m 700 "$fixed_tmp"
-  set +e
-  "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" "$injected_failure=1" \
-    "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-$injected_failure.log" 2>&1
-  status=$?
-  set -e
-  [ "$status" -eq "$expected_status" ]
-  grep -Fq "$expected_marker" "$log_root/host-$injected_failure.log"
-  if [ "$injected_failure" = FAKE_DUMP_STAT_FAIL ]; then
-    grep -Fq 'Host dump file permissions are unsafe.' "$log_root/host-$injected_failure.log"
+  if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" "$injected_failure=1" \
+      "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-$injected_failure.log" 2>&1; then
+    status=0
+  else
+    status=$?
   fi
-  [ ! -e "$fixed_tmp" ]
-  backup_tmp_is_empty
+  assert_status "$expected_status" "$status" injected-failure-status
+  assert_contains "$log_root/host-$injected_failure.log" "$expected_marker" injected-failure-marker
+  if [ "$injected_failure" = FAKE_DUMP_STAT_FAIL ]; then
+    assert_contains "$log_root/host-$injected_failure.log" 'Host dump file permissions are unsafe.' dump-stat-diagnostic
+  fi
+  assert_runner_file_absent "$fixed_tmp" injected-fixture-removed
+  assert_backup_tmp_empty injected-failure-cleanup
+  pass_case "$injected_case"
 done
-set +e
-"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_STREAM_FAIL=1 \
-  "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-partial-stream.log" 2>&1
-partial_stream_status=$?
-set -e
-[ "$partial_stream_status" -eq 79 ]
-grep -Fq 'Injected PostgreSQL dump stream failure.' "$log_root/host-partial-stream.log"
-backup_tmp_is_empty
 
-"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$root/scripts/backup/postgres-backup.sh" >"$log_root/below-warning.log" 2>&1
-capture_is_runner_readable "$log_root/below-warning.log"
-if grep -Fq 'Warning: repository reached 12 GiB.' "$log_root/below-warning.log"; then
-  exit 1
+begin_case host-partial-stream
+partial_stream_status=0
+if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_STREAM_FAIL=1 \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-partial-stream.log" 2>&1; then
+  partial_stream_status=0
+else
+  partial_stream_status=$?
 fi
-backup_tmp_is_empty
+assert_status 79 "$partial_stream_status" partial-stream-status
+assert_contains "$log_root/host-partial-stream.log" 'Injected PostgreSQL dump stream failure.' partial-stream-marker
+assert_backup_tmp_empty partial-stream-cleanup
+pass_case host-partial-stream
 
-set +e
-"${runner[@]}" env "${root_env[@]}" FAKE_STALE_RUNTIME=1 FAKE_REPOSITORY_BYTES="$below_warning" \
-  "$root/scripts/backup/postgres-backup.sh" >"$log_root/stale-runtime.log" 2>&1
-stale_runtime_status=$?
-set -e
-[ "$stale_runtime_status" -ne 0 ]
-grep -Fq 'PostgreSQL backup runtime is unsafe or contains operation state.' "$log_root/stale-runtime.log"
-backup_tmp_is_empty
+begin_case repository-below-warning
+diagnostics_set_assertion backup-command-success
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$root/scripts/backup/postgres-backup.sh" >"$log_root/below-warning.log" 2>&1
+assert_command_succeeds log-readable capture_is_runner_readable "$log_root/below-warning.log"
+assert_not_contains "$log_root/below-warning.log" 'Warning: repository reached 12 GiB.' warning-absent
+assert_backup_tmp_empty below-warning-cleanup
+pass_case repository-below-warning
 
+begin_case runtime-stale-state
+stale_runtime_status=0
+if "${runner[@]}" env "${root_env[@]}" FAKE_STALE_RUNTIME=1 FAKE_REPOSITORY_BYTES="$below_warning" \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/stale-runtime.log" 2>&1; then
+  stale_runtime_status=0
+else
+  stale_runtime_status=$?
+fi
+assert_nonzero_status "$stale_runtime_status" stale-runtime-status
+assert_contains "$log_root/stale-runtime.log" 'PostgreSQL backup runtime is unsafe or contains operation state.' stale-runtime-diagnostic
+assert_backup_tmp_empty stale-runtime-cleanup
+pass_case runtime-stale-state
+
+begin_case operation-collision-retry
 rm -f "$log_root/collision-proof"
+diagnostics_set_assertion backup-command-success
 "${runner[@]}" env "${root_env[@]}" FAKE_COLLISION_ONCE=1 FAKE_REPOSITORY_BYTES="$below_warning" \
   "$root/scripts/backup/postgres-backup.sh" >"$log_root/collision.log" 2>&1
-"${runner[@]}" grep -Fxq 'existing-operation-preserved' "$log_root/collision-proof"
-grep -Fq 'PostgreSQL backup completed.' "$log_root/collision.log"
-backup_tmp_is_empty
+assert_command_succeeds collision-state-preserved "${runner[@]}" grep -Fxq 'existing-operation-preserved' "$log_root/collision-proof"
+assert_contains "$log_root/collision.log" 'PostgreSQL backup completed.' collision-backup-completed
+assert_backup_tmp_empty collision-cleanup
+pass_case operation-collision-retry
 
+begin_case repository-warning
+diagnostics_set_assertion backup-command-success
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$at_warning" "$root/scripts/backup/postgres-backup.sh" >"$log_root/at-warning.log" 2>&1
-capture_is_runner_readable "$log_root/at-warning.log"
-grep -Fq 'Warning: repository reached 12 GiB.' "$log_root/at-warning.log"
-if grep -Fq 'Backup stopped: repository reached the 14 GiB hard limit.' "$log_root/at-warning.log"; then
-  exit 1
+assert_command_succeeds log-readable capture_is_runner_readable "$log_root/at-warning.log"
+assert_contains "$log_root/at-warning.log" 'Warning: repository reached 12 GiB.' warning-present
+assert_not_contains "$log_root/at-warning.log" 'Backup stopped: repository reached the 14 GiB hard limit.' hard-stop-absent
+assert_backup_tmp_empty warning-cleanup
+pass_case repository-warning
+
+begin_case repository-hard-stop
+hard_stop_status=0
+if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$at_hard_stop" "$root/scripts/backup/postgres-backup.sh" >"$log_root/at-hard-stop.log" 2>&1; then
+  hard_stop_status=0
+else
+  hard_stop_status=$?
 fi
-backup_tmp_is_empty
+assert_nonzero_status "$hard_stop_status" hard-stop-status
+assert_command_succeeds log-readable capture_is_runner_readable "$log_root/at-hard-stop.log"
+assert_contains "$log_root/at-hard-stop.log" 'Backup stopped: repository reached the 14 GiB hard limit.' hard-stop-diagnostic
+assert_backup_tmp_empty hard-stop-cleanup
+pass_case repository-hard-stop
 
-set +e
-"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$at_hard_stop" "$root/scripts/backup/postgres-backup.sh" >"$log_root/at-hard-stop.log" 2>&1
-hard_stop_status=$?
-set -e
-[ "$hard_stop_status" -ne 0 ]
-capture_is_runner_readable "$log_root/at-hard-stop.log"
-grep -Fq 'Backup stopped: repository reached the 14 GiB hard limit.' "$log_root/at-hard-stop.log"
-backup_tmp_is_empty
-
-set +e
-"${runner[@]}" env "${root_env[@]}" FAKE_RESTIC_FAIL=1 "$root/scripts/backup/postgres-backup.sh" >"$log_root/failure.log" 2>&1
-failure_status=$?
-set -e
-[ "$failure_status" -eq 42 ]
-backup_tmp_is_empty
-capture_is_runner_readable "$log_root/failure.log"
-grep -Fq 'Injected Restic backup failure.' "$log_root/failure.log"
-if grep -Eq 'fake-secret|password|token' "$log_root/below-warning.log" "$log_root/at-warning.log" "$log_root/at-hard-stop.log" "$log_root/failure.log"; then
-  exit 1
+begin_case restic-failure
+failure_status=0
+if "${runner[@]}" env "${root_env[@]}" FAKE_RESTIC_FAIL=1 "$root/scripts/backup/postgres-backup.sh" >"$log_root/failure.log" 2>&1; then
+  failure_status=0
+else
+  failure_status=$?
 fi
+assert_status 42 "$failure_status" restic-failure-status
+assert_backup_tmp_empty restic-failure-cleanup
+assert_command_succeeds log-readable capture_is_runner_readable "$log_root/failure.log"
+assert_contains "$log_root/failure.log" 'Injected Restic backup failure.' restic-failure-marker
+secret_scan_status=0
+if grep -Eq 'fake-secret|password|token' "$log_root/below-warning.log" "$log_root/at-warning.log" "$log_root/at-hard-stop.log" "$log_root/failure.log" 2>/dev/null; then
+  secret_scan_status=0
+else
+  secret_scan_status=$?
+fi
+assert_status 1 "$secret_scan_status" captured-log-secret-scan
+pass_case restic-failure
 
+begin_case restore-database-guard
 restore_guard_log="$log_root/restore-guard.log"
-: >"$restore_guard_log" || { printf '%s\n' 'Restore guard harness log setup failed.' >&2; exit 1; }
-[ -w "$restore_guard_log" ] || { printf '%s\n' 'Restore guard harness log is not writable.' >&2; exit 1; }
-set +e
-"${runner[@]}" env "${root_env[@]}" AVELREN_PG_DATABASE=not_avelren "$root/scripts/backup/postgres-restore-drill.sh" >"$restore_guard_log" 2>&1
-restore_status=$?
-set -e
-[ "$restore_status" -ne 0 ]
-grep -Fq 'Production database name must remain avelren.' "$restore_guard_log"
-if grep -Fqi 'permission denied' "$restore_guard_log"; then
-  printf '%s\n' 'Restore guard harness failed before executing the guard.' >&2
-  exit 1
+restore_log_status=0
+if : >"$restore_guard_log"; then
+  restore_log_status=0
+else
+  restore_log_status=$?
 fi
-[ ! -e "$log_root/db-created" ]
+assert_status 0 "$restore_log_status" restore-log-created
+assert_command_succeeds restore-log-writable test -w "$restore_guard_log"
+restore_status=0
+if "${runner[@]}" env "${root_env[@]}" AVELREN_PG_DATABASE=not_avelren "$root/scripts/backup/postgres-restore-drill.sh" >"$restore_guard_log" 2>&1; then
+  restore_status=0
+else
+  restore_status=$?
+fi
+assert_nonzero_status "$restore_status" restore-guard-status
+assert_contains "$restore_guard_log" 'Production database name must remain avelren.' restore-guard-diagnostic
+assert_not_contains_ci "$restore_guard_log" 'permission denied' restore-guard-reached
+assert_file_absent "$log_root/db-created" restore-database-not-created
+pass_case restore-database-guard
 
 printf '%s\n' 'PostgreSQL backup failure-path and cleanup tests passed.'
