@@ -770,33 +770,41 @@ release_file="$3"
 result_file="$4"
 child_ready_file="$5"
 create_client_pid=
+create_client_start=
 create_client_launching=0
 pending_signal_status=
 
 stop_and_reap_child() {
   pid="$1"
+  expected_start="$2"
+  metadata="$(awk '{print $3 ":" $4 ":" $22}' "/proc/$pid/stat" 2>/dev/null)" || return 1
+  [ "${metadata#*:}" = "$$:$expected_start" ] || return 1
   kill -TERM "$pid" 2>/dev/null || :
   attempt=0
-  while kill -0 "$pid" 2>/dev/null; do
-    state="$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null || true)"
+  while metadata="$(awk '{print $3 ":" $4 ":" $22}' "/proc/$pid/stat" 2>/dev/null)"; do
+    [ "${metadata#*:}" = "$$:$expected_start" ] || return 1
+    state="${metadata%%:*}"
     [ "$state" != Z ] || break
     [ "$attempt" -lt 50 ] || break
     attempt=$((attempt + 1))
     sleep 0.02
   done
-  if kill -0 "$pid" 2>/dev/null && [ "$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null)" != Z ]; then
-    kill -KILL "$pid" 2>/dev/null || :
+  metadata="$(awk '{print $3 ":" $4 ":" $22}' "/proc/$pid/stat" 2>/dev/null || true)"
+  if [ -n "$metadata" ]; then
+    [ "${metadata#*:}" = "$$:$expected_start" ] || return 1
+    if [ "${metadata%%:*}" != Z ] && kill -KILL "$pid" 2>/dev/null; then
+      printf '%s\n' kill-escalated >>"$result_file"
+    fi
   fi
-  wait "$pid" 2>/dev/null || :
-  second_wait_status=0
-  if wait "$pid" 2>/dev/null; then second_wait_status=0; else second_wait_status=$?; fi
-  printf 'reaped:%s\n' "$second_wait_status" >>"$result_file"
+  child_wait_status=0
+  if wait "$pid" 2>/dev/null; then child_wait_status=0; else child_wait_status=$?; fi
+  printf 'reaped-status:%s\n' "$child_wait_status" >>"$result_file"
 }
 
 terminate_handoff() {
   status="$1"
   trap '' HUP INT TERM
-  stop_and_reap_child "$create_client_pid"
+  stop_and_reap_child "$create_client_pid" "$create_client_start"
   exit "$status"
 }
 
@@ -816,11 +824,18 @@ trap 'handle_handoff_signal 143' TERM
 
 create_client_launching=1
 python3 -c 'import pathlib, signal, sys; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(sys.argv[1]).write_text("ready\n", encoding="ascii"); signal.pause()' "$child_ready_file" &
+spawned_child_pid=$!
 while [ ! -s "$child_ready_file" ]; do sleep 0.02; done
-printf '%s:%s\n' "$$" "$!" >"$pid_file"
+spawned_child_metadata="$(awk '{print $4 ":" $22}' "/proc/$spawned_child_pid/stat")" || exit 98
+spawned_child_parent="${spawned_child_metadata%%:*}"
+spawned_child_start="${spawned_child_metadata#*:}"
+[ "$spawned_child_parent" = "$$" ] || exit 98
+case "$spawned_child_start" in ''|*[!0-9]*) exit 98 ;; esac
+printf '%s:%s:%s\n' "$$" "$spawned_child_pid" "$spawned_child_start" >"$pid_file"
 printf '%s\n' ready >"$ready_file"
 while [ ! -e "$release_file" ]; do sleep 0.02; done
-create_client_pid=$!
+create_client_pid="$spawned_child_pid"
+create_client_start="$spawned_child_start"
 printf 'captured:%s\n' "$create_client_pid" >>"$result_file"
 create_client_launching=0
 if [ -n "$pending_signal_status" ]; then terminate_handoff "$pending_signal_status"; fi
@@ -842,7 +857,8 @@ run_create_client_handoff_case() {
   local signal="$1" expected_status="$2" label="restore-create-client-handoff-${1,,}"
   local ready="$state_root/$label-ready" pids="$state_root/$label-pids"
   local release="$state_root/$label-release" result="$state_root/$label-result"
-  local child_ready="$state_root/$label-child-ready" launch_pid creator_pid published_outer child_pid status=0
+  local child_ready="$state_root/$label-child-ready" launch_pid creator_pid published_outer child_pid
+  local child_identity child_start current_start reap_status status=0
   rm -f -- "$ready" "$pids" "$release" "$result" "$child_ready"
   : >"$result"
   : >"$outer_pid_file"
@@ -852,12 +868,16 @@ run_create_client_handoff_case() {
   launch_pid=$!
   active_launch_pid="$launch_pid"
   wait_for_marker "$ready" "$launch_pid" || fail "$label (launch barrier was not reached)"
-  IFS=: read -r creator_pid child_pid <"$pids"
+  IFS=: read -r creator_pid child_pid child_start <"$pids"
   case "$creator_pid" in ''|*[!0-9]*) fail "$label (invalid creator pid)" ;; esac
   published_outer="$(cat "$outer_pid_file")"
   [ "$published_outer" = "$creator_pid" ] || fail "$label (signal-reset identity mismatch)"
   active_outer_pid="$creator_pid"
   case "$child_pid" in ''|*[!0-9]*) fail "$label (invalid child pid)" ;; esac
+  case "$child_start" in ''|*[!0-9]*) fail "$label (invalid child start time)" ;; esac
+  child_identity="$(awk '{print $4 ":" $22}' "/proc/$child_pid/stat")"
+  [ "$child_identity" = "$creator_pid:$child_start" ] || \
+    fail "$label (child identity did not match the creator publication)"
   kill -s "$signal" "$creator_pid"
   wait_for_content "$result" "queued:$expected_status" "$launch_pid" || fail "$label (signal was not queued)"
   kill -0 "$child_pid" 2>/dev/null || fail "$label (child exited before queued signal consumption)"
@@ -868,8 +888,18 @@ run_create_client_handoff_case() {
   active_outer_pid=
   assert_status "$expected_status" "$status" "$label-status"
   assert_contains "$result" "captured:$child_pid" "$label-pid-captured"
-  assert_contains "$result" 'reaped:127' "$label-direct-parent-reap"
-  if kill -0 "$child_pid" 2>/dev/null; then fail "$label (child survived cleanup)"; fi
+  assert_contains "$result" kill-escalated "$label-kill-escalation"
+  # Fields belong to awk; no shell expansion is intended.
+  # shellcheck disable=SC2016
+  reap_status="$(awk -F: '$1 == "reaped-status" { value=$2 } END { print value }' "$result")"
+  case "$reap_status" in ''|*[!0-9]*) fail "$label (invalid direct-parent wait status)" ;; esac
+  if [ "$reap_status" -le 128 ] || [ "$reap_status" -gt 255 ]; then
+    fail "$label (direct-parent wait did not return a signal-derived status)"
+  fi
+  if [ -r "/proc/$child_pid/stat" ]; then
+    current_start="$(awk '{print $22}' "/proc/$child_pid/stat")"
+    [ "$current_start" != "$child_start" ] || fail "$label (original child identity survived cleanup)"
+  fi
   rm -f -- "$ready" "$pids" "$release" "$result" "$child_ready"
   pass "$label"
 }
