@@ -58,6 +58,7 @@ else
     'repository-below-warning|repository below warning threshold succeeds'
     'runtime-stale-state|stale runtime state is rejected'
     'operation-collision-retry|operation collision preserves existing state'
+    'setup-evidence-classification|root-owned setup evidence is classified without exposing content'
     'operation-setup-before-creation-signals|setup ownership is safe before operation creation'
     'operation-setup-window-signals|setup-window signals clean the owned operation'
     'operation-setup-after-return-signal|signal after setup return cleans the active operation'
@@ -292,6 +293,12 @@ wait_setup_barrier() {
   [ "$release" = release ]
 }
 
+record_setup_phase() {
+  local phase="$1"
+  [ -n "${FAKE_SETUP_PHASE_TRACE:-}" ] || return 0
+  printf '%s\n' "$phase" >>"$FAKE_SETUP_PHASE_TRACE"
+}
+
 case "$args" in
   *'ps -q postgres'*) printf '%s\n' fake-postgres ;;
   *State.Health.Status*) printf '%s\n' healthy ;;
@@ -323,14 +330,17 @@ case "$args" in
       printf '%s\n' starting >"$FAKE_DOCKER_STATE"
       exit 0
     fi
+    record_setup_phase setup-entered
     operation="$(operation_path "$control_dir")"
     printf '%s\n' "${control_dir##*/}" >"${FAKE_SETUP_CONTROL_FILE:-/dev/null}"
     if [ "${FAKE_SETUP_FAIL:-}" = before ]; then exit 75; fi
     if [ "${FAKE_COLLISION_SIGNAL:-0}" = 1 ]; then
       mkdir -m 700 -- "$operation"
+      record_setup_phase operation-directory-created
       if [ "${setup_token:0:1}" = 0 ]; then foreign_token="1${setup_token:1}"; else foreign_token="0${setup_token:1}"; fi
       printf '%s\n' "$foreign_token" >"$operation/.setup-owner"
       chmod 600 "$operation/.setup-owner"
+      record_setup_phase setup-owner-written
       printf '%s\n' 'existing-operation-preserved' >"$FAKE_COLLISION_PROOF"
       wait_setup_barrier collision
       exit 73
@@ -342,8 +352,10 @@ case "$args" in
     wait_setup_barrier before-creation
     [ "${FAKE_SETUP_BARRIER_PHASE:-}" != before-creation ] || exit 75
     mkdir -m 700 -- "$operation"
+    record_setup_phase operation-directory-created
     printf '%s\n' "$setup_token" >"$operation/.setup-owner"
     chmod 600 "$operation/.setup-owner"
+    record_setup_phase setup-owner-written
     printf '%s\n' runner >"$operation/runner.sh"
     printf '%s\n' heartbeat >"$operation/heartbeat"
     wait_setup_barrier after-creation
@@ -369,14 +381,19 @@ case "$args" in
     ;;
   *'exec --interactive --user 0 fake-postgres sh -s -- cleanup-owned '*)
     cat >/dev/null
+    record_setup_phase cleanup-owned-entered
     [ "${FAKE_CLEANUP_UNAVAILABLE:-0}" = 0 ] || exit 69
     control_dir="$(control_argument cleanup-owned 1)"
     setup_token="$(control_argument cleanup-owned 3)"
     operation="$(operation_path "$control_dir")"
-    if [ ! -e "$operation" ]; then exit 0; fi
+    if [ ! -e "$operation" ]; then
+      record_setup_phase cleanup-owned-success
+      exit 0
+    fi
     if [ -f "$operation/.setup-owner" ] && [ "$(cat "$operation/.setup-owner")" = "$setup_token" ]; then
       rm -rf -- "$operation"
       printf '%s\n' cleaned >>"$FAKE_SETUP_CLEANUP_TRACE"
+      record_setup_phase cleanup-owned-success
       exit 0
     fi
     printf '%s\n' preserved >>"$FAKE_SETUP_CLEANUP_TRACE"
@@ -491,6 +508,7 @@ dump_mode="$state_root/dump-mode"
 operation_root="$state_root/operations"
 setup_control_file="$state_root/setup-control"
 setup_cleanup_trace="$state_root/setup-cleanup-trace"
+setup_phase_trace="$state_root/setup-phase-trace"
 detached_reached="$state_root/detached-reached"
 mkdir -m 700 "$operation_root"
 touch "$rclone_calls" "$restic_repositories" "$restic_calls"
@@ -614,20 +632,6 @@ assert_runner_file_absent() {
   fi
   assert_status 0 "$status" "$assertion"
 }
-assert_runner_contains_exact_line() {
-  local file="$1" marker="$2" assertion="$3" status=0 actual=absent
-  diagnostics_current_assertion="$assertion"
-  if "${runner[@]}" grep -Fxq -- "$marker" "$file" 2>/dev/null; then
-    return 0
-  else
-    status=$?
-  fi
-  [ "$status" -eq 1 ] || actual=unavailable
-  [ "$status" -eq 1 ] || status=2
-  diagnostics_record_failure "$status" "${BASH_LINENO[0]}" "$assertion" marker present "$actual"
-  trap - ERR
-  exit "$status"
-}
 remove_runner_or_root_fixture() {
   local path="$1" assertion="$2" status=0
   diagnostics_set_assertion "$assertion"
@@ -682,7 +686,112 @@ reset_setup_signal_fixtures() {
   local suffix="$1"
   remove_runner_or_root_fixture "$setup_control_file" "$suffix-control-reset"
   remove_runner_or_root_fixture "$setup_cleanup_trace" "$suffix-cleanup-trace-reset"
+  remove_runner_or_root_fixture "$setup_phase_trace" "$suffix-phase-trace-reset"
   remove_runner_or_root_fixture "$detached_reached" "$suffix-detached-reset"
+}
+initialize_setup_evidence() {
+  local label="$1"
+  diagnostics_set_assertion "$label-evidence-create"
+  : >"$setup_cleanup_trace"
+  : >"$setup_phase_trace"
+  chmod 600 "$setup_cleanup_trace" "$setup_phase_trace"
+  setup_evidence_identity_before="$(stat -c '%d:%i' -- "$setup_cleanup_trace")"
+}
+inspect_marker_evidence() {
+  local path="$1" marker="$2" label="$3" created_before_signal="$4"
+  local identity_before="$5" primary_status="$6" cleanup_result="$7" operation_final="$8"
+  local parent="${path%/*}" path_exists=no path_type=missing parent_exists=no
+  local parent_traversal_user=no parent_traversal_root=no file_readable_user=no file_readable_root=no
+  local file_metadata='unavailable:unavailable:unavailable:unavailable'
+  local parent_metadata='unavailable:unavailable:unavailable' identity_after=unavailable replaced=unknown
+  local user_grep_status=2 root_grep_status=2 classification=unknown marker_root=no
+
+  if "${runner[@]}" test -e "$parent" && ! "${runner[@]}" test -L "$parent"; then parent_exists=yes; fi
+  [ -x "$parent" ] && parent_traversal_user=yes
+  if "${runner[@]}" test -x "$parent"; then parent_traversal_root=yes; fi
+  if parent_metadata="$("${runner[@]}" stat -c '%u:%g:%a' -- "$parent" 2>/dev/null)"; then :; else parent_metadata='unavailable:unavailable:unavailable'; fi
+
+  if "${runner[@]}" test -L "$path"; then
+    path_exists=yes
+    path_type=symlink
+  elif "${runner[@]}" test -f "$path"; then
+    path_exists=yes
+    path_type=regular
+  elif "${runner[@]}" test -d "$path"; then
+    path_exists=yes
+    path_type=directory
+  elif "${runner[@]}" test -e "$path"; then
+    path_exists=yes
+    path_type=other
+  fi
+
+  if [ "$path_exists" = yes ]; then
+    if file_metadata="$("${runner[@]}" stat -c '%u:%g:%a:%s' -- "$path" 2>/dev/null)"; then :; else file_metadata='unavailable:unavailable:unavailable:unavailable'; fi
+    if identity_after="$("${runner[@]}" stat -c '%d:%i' -- "$path" 2>/dev/null)"; then
+      if [ "$identity_after" = "$identity_before" ]; then replaced=no; else replaced=yes; fi
+    fi
+    [ -r "$path" ] && file_readable_user=yes
+    if "${runner[@]}" test -r "$path"; then file_readable_root=yes; fi
+  fi
+
+  if [ "$path_type" = regular ]; then
+    if grep -Fxq -- "$marker" "$path" 2>/dev/null; then user_grep_status=0; else user_grep_status=$?; fi
+    if "${runner[@]}" grep -Fxq -- "$marker" "$path" 2>/dev/null; then root_grep_status=0; else root_grep_status=$?; fi
+  fi
+  [ "$root_grep_status" -eq 0 ] && marker_root=yes
+
+  if [ "$path_exists" = no ]; then
+    if [ "$identity_before" = unavailable ]; then
+      classification=evidence-file-missing
+    else
+      classification=evidence-removed-before-assertion
+    fi
+  elif [ "$parent_traversal_user" = no ]; then
+    classification=evidence-parent-not-traversable
+  elif [ "$path_type" != regular ]; then
+    classification=grep-error
+  elif [ "$root_grep_status" -eq 0 ] && [ "$user_grep_status" -eq 2 ] && [ "${file_metadata%%:*}" = 0 ]; then
+    classification=marker-present-root-only
+  elif [ "$user_grep_status" -eq 2 ] && [ "${file_metadata%%:*}" = 0 ]; then
+    classification=evidence-root-owned
+  elif [ "$user_grep_status" -eq 2 ]; then
+    classification=evidence-file-not-readable
+  elif [ "$root_grep_status" -eq 1 ]; then
+    classification=marker-absent
+  elif [ "$root_grep_status" -gt 1 ]; then
+    classification=grep-error
+  fi
+
+  marker_evidence_classification="$classification"
+  marker_evidence_user_grep_status="$user_grep_status"
+  marker_evidence_root_grep_status="$root_grep_status"
+  marker_evidence_file_metadata="$file_metadata"
+  marker_evidence_parent_metadata="$parent_metadata"
+  printf 'evidence case=%s classification=%s exists=%s type=%s parent-exists=%s parent-traversal-user=%s parent-traversal-root=%s file-readable-user=%s file-readable-root=%s file-metadata=%s parent-metadata=%s size=%s grep-user=%s grep-root=%s created-before-signal=%s replaced=%s marker-root=%s primary-status=%s cleanup-owned=%s operation-final=%s\n' \
+    "$label" "$classification" "$path_exists" "$path_type" "$parent_exists" "$parent_traversal_user" \
+    "$parent_traversal_root" "$file_readable_user" "$file_readable_root" "$file_metadata" "$parent_metadata" \
+    "${file_metadata##*:}" "$user_grep_status" "$root_grep_status" "$created_before_signal" "$replaced" \
+    "$marker_root" "$primary_status" "$cleanup_result" "$operation_final"
+}
+assert_marker_evidence() {
+  local path="$1" marker="$2" label="$3" expected="$4" created_before_signal="$5"
+  local identity_before="$6" primary_status="$7" cleanup_result="$8" operation_final="$9"
+  inspect_marker_evidence "$path" "$marker" "$label" "$created_before_signal" "$identity_before" \
+    "$primary_status" "$cleanup_result" "$operation_final"
+  case "$expected:$marker_evidence_root_grep_status" in
+    present:0|absent:1) return 0 ;;
+    present:1) fail_case "$label" marker-present marker-absent ;;
+    absent:0) fail_case "$label" marker-absent marker-present ;;
+    *) fail_case "$label" marker-status "$marker_evidence_classification" ;;
+  esac
+}
+assert_setup_phase_sequence() {
+  local label="$1" actual expected
+  shift
+  diagnostics_set_assertion "$label"
+  actual="$(<"$setup_phase_trace")"
+  expected="$(printf '%s\n' "$@")"
+  [ "$actual" = "$expected" ] || fail_case "$label" exact-sequence mismatch
 }
 assert_harness_root_ownership() {
   local suffix="$1" test_metadata log_metadata
@@ -1449,13 +1558,33 @@ assert_contains "$log_root/collision.log" 'PostgreSQL backup completed.' collisi
 assert_backup_tmp_empty collision-cleanup
 pass_case operation-collision-retry
 
+begin_case setup-evidence-classification
+reset_setup_signal_fixtures setup-evidence-classification
+# Expansion belongs to the isolated root-capable evidence writer.
+# shellcheck disable=SC2016
+assert_command_succeeds legacy-root-evidence-create "${runner[@]}" env EVIDENCE="$setup_cleanup_trace" \
+  bash -c 'umask 077; printf "%s\n" cleaned >"$EVIDENCE"'
+legacy_evidence_identity="$("${runner[@]}" stat -c '%d:%i' -- "$setup_cleanup_trace")"
+inspect_marker_evidence "$setup_cleanup_trace" cleaned legacy-root-evidence no "$legacy_evidence_identity" \
+  130 success absent
+[ "$marker_evidence_classification" = marker-present-root-only ] || \
+  fail_case legacy-root-evidence-classification marker-present-root-only "$marker_evidence_classification"
+assert_status 2 "$marker_evidence_user_grep_status" legacy-root-evidence-user-grep
+assert_status 0 "$marker_evidence_root_grep_status" legacy-root-evidence-root-grep
+assert_owner_mode '0:0:600' "${marker_evidence_file_metadata%:*}" legacy-root-evidence-owner-mode
+assert_owner_mode "$harness_uid:$harness_gid:700" "$marker_evidence_parent_metadata" legacy-root-evidence-parent-owner-mode
+remove_runner_or_root_fixture "$setup_cleanup_trace" legacy-root-evidence-cleanup
+pass_case setup-evidence-classification
+
 run_setup_signal_case() {
-  local label="$1" phase="$2" signal="$3" expected_status="$4" expected_cleanup="$5"
-  shift 5
+  local label="$1" phase="$2" signal="$3" expected_status="$4" expected_cleanup="$5" expected_marker="$6"
+  shift 6
   local ready="$state_root/setup-ready-$label" release="$state_root/setup-release-$label"
   local outer_pid_file="$state_root/setup-outer-pid-$label" log_file="$log_root/setup-signal-$label.log"
-  local launch_pid outer_pid status=0 operation_name operation_path
+  local launch_pid outer_pid status=0 operation_name operation_path cleanup_result operation_final
+  local -a expected_phases
   reset_setup_signal_fixtures "$label"
+  initialize_setup_evidence "$label"
   remove_runner_or_root_fixture "$ready" "$label-ready-reset"
   remove_runner_or_root_fixture "$release" "$label-release-reset"
   remove_runner_or_root_fixture "$outer_pid_file" "$label-pid-reset"
@@ -1464,6 +1593,7 @@ run_setup_signal_case() {
   diagnostics_set_assertion "$label-backup-launch"
   "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
     FAKE_SETUP_BARRIER_PHASE="$phase" FAKE_SETUP_READY="$ready" FAKE_SETUP_RELEASE="$release" \
+    FAKE_SETUP_PHASE_TRACE="$setup_phase_trace" \
     AVELREN_BACKUP_DOCKER_TIMEOUT=10 AVELREN_TEST_OUTER_PID_FILE="$outer_pid_file" "$@" \
     "$signal_launcher" "$root/scripts/backup/postgres-backup.sh" >"$log_file" 2>&1 &
   launch_pid=$!
@@ -1492,6 +1622,9 @@ run_setup_signal_case() {
   outer_pid="$("${runner[@]}" cat "$outer_pid_file")"
   case "$outer_pid" in ''|*[!0-9]*) fail_case "$label-outer-pid" numeric invalid ;; esac
   diagnostics_set_assertion "$label-signal-delivery"
+  # Record the deterministic delivery point before the target trap can append
+  # cleanup evidence concurrently. The signal-derived exit status proves receipt.
+  printf '%s\n' signal-observed >>"$setup_phase_trace"
   "${runner[@]}" kill -s "$signal" "$outer_pid"
   if [ "$phase" = after-creation ] || [ "$phase" = collision ]; then
     assert_command_succeeds "$label-still-blocked-before-release" "${runner[@]}" test -d "$operation_path"
@@ -1502,24 +1635,53 @@ run_setup_signal_case() {
   diagnostics_set_assertion "$label-outer-exit"
   wait_for_wrapper_exit "$launch_pid"
   if wait "$launch_pid"; then status=0; else status=$?; fi
+  printf '%s\n' foreground-returned >>"$setup_phase_trace"
   assert_status "$expected_status" "$status" "$label-signal-status"
   case "$expected_cleanup" in
-    absent) assert_runner_file_absent "$operation_path" "$label-operation-absent" ;;
+    absent)
+      assert_runner_file_absent "$operation_path" "$label-operation-absent"
+      cleanup_result=success
+      operation_final=absent
+      ;;
     cleaned)
       assert_runner_file_absent "$operation_path" "$label-operation-cleaned"
-      if [ "$phase" = after-creation ]; then
-        assert_runner_contains_exact_line "$setup_cleanup_trace" cleaned "$label-token-cleanup"
-      fi
+      if [ "$phase" = before-detached ]; then cleanup_result=not-invoked; else cleanup_result=success; fi
+      operation_final=absent
       ;;
     preserved)
       assert_command_succeeds "$label-operation-preserved" "${runner[@]}" test -d "$operation_path"
+      operation_final=present
+      if [ "$expected_marker" = preserved ]; then cleanup_result=rejected; else cleanup_result=unavailable; fi
       ;;
     *) fail_case "$label-cleanup-contract" known unknown ;;
   esac
+  printf '%s\n' evidence-finalized >>"$setup_phase_trace"
+  printf '%s\n' assertion-started >>"$setup_phase_trace"
+  if [ "$expected_marker" = none ]; then
+    assert_marker_evidence "$setup_cleanup_trace" cleaned "$label-token-cleanup" absent yes \
+      "$setup_evidence_identity_before" "$status" "$cleanup_result" "$operation_final"
+  else
+    assert_marker_evidence "$setup_cleanup_trace" "$expected_marker" "$label-token-cleanup" present yes \
+      "$setup_evidence_identity_before" "$status" "$cleanup_result" "$operation_final"
+  fi
+  expected_phases=(setup-entered)
+  case "$phase" in after-creation|collision|before-detached)
+    expected_phases+=(operation-directory-created setup-owner-written)
+    ;;
+  esac
+  expected_phases+=(signal-observed)
+  if [ "$phase" != before-detached ]; then
+    expected_phases+=(cleanup-owned-entered)
+    [ "$cleanup_result" != success ] || expected_phases+=(cleanup-owned-success)
+  fi
+  expected_phases+=(foreground-returned evidence-finalized assertion-started)
+  assert_setup_phase_sequence "$label-phase-sequence" "${expected_phases[@]}"
   assert_not_contains "$log_file" fixture-password "$label-secret-absent"
   remove_runner_or_root_fixture "$release" "$label-release-cleanup"
   remove_runner_or_root_fixture "$ready" "$label-ready-cleanup"
   remove_runner_or_root_fixture "$outer_pid_file" "$label-pid-cleanup"
+  remove_runner_or_root_fixture "$setup_cleanup_trace" "$label-cleanup-trace-cleanup"
+  remove_runner_or_root_fixture "$setup_phase_trace" "$label-phase-trace-cleanup"
   printf 'signal-setup case=%s phase=%s signal=%s exit-status=%s cleanup=%s barrier=pass\n' \
     "$label" "$phase" "$signal" "$status" "$expected_cleanup"
 }
@@ -1533,31 +1695,47 @@ assert_next_backup_succeeds() {
   assert_operation_root_empty "$label-next-backup-runtime-clean"
   assert_contains "$log_root/$label-next-backup.log" 'PostgreSQL backup completed.' "$label-next-backup-completed"
 }
+assert_stale_setup_blocks_next_backup() {
+  local label="$1" status=0
+  if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
+      "$root/scripts/backup/postgres-backup.sh" >"$log_root/$label-stale-next.log" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  assert_status 1 "$status" "$label-stale-next-status"
+  assert_contains "$log_root/$label-stale-next.log" \
+    'PostgreSQL backup runtime is unsafe or contains operation state.' "$label-stale-next-diagnostic"
+}
 
 begin_case operation-setup-before-creation-signals
-run_setup_signal_case setup-before-int before-creation INT 130 absent
+run_setup_signal_case setup-before-int before-creation INT 130 absent none
 assert_next_backup_succeeds setup-before-int
-run_setup_signal_case setup-before-term before-creation TERM 143 absent
+run_setup_signal_case setup-before-term before-creation TERM 143 absent none
 assert_next_backup_succeeds setup-before-term
 pass_case operation-setup-before-creation-signals
 
 begin_case operation-setup-window-signals
-run_setup_signal_case setup-window-int after-creation INT 130 cleaned
+run_setup_signal_case setup-window-int after-creation INT 130 cleaned cleaned
 assert_next_backup_succeeds setup-window-int
-run_setup_signal_case setup-window-term after-creation TERM 143 cleaned
+run_setup_signal_case setup-window-term after-creation TERM 143 cleaned cleaned
 assert_next_backup_succeeds setup-window-term
 pass_case operation-setup-window-signals
 
 begin_case operation-setup-after-return-signal
-run_setup_signal_case setup-before-detached-term before-detached TERM 143 cleaned
+run_setup_signal_case setup-before-detached-int before-detached INT 130 cleaned none
+assert_next_backup_succeeds setup-before-detached-int
+run_setup_signal_case setup-before-detached-term before-detached TERM 143 cleaned none
 assert_next_backup_succeeds setup-before-detached-term
 pass_case operation-setup-after-return-signal
 
 begin_case operation-setup-failure-cleanup
 for setup_failure in before after; do
   reset_setup_signal_fixtures "setup-failure-$setup_failure"
+  initialize_setup_evidence "setup-failure-$setup_failure"
   setup_failure_status=0
   if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_SETUP_FAIL="$setup_failure" \
+      FAKE_SETUP_PHASE_TRACE="$setup_phase_trace" \
       "$root/scripts/backup/postgres-backup.sh" >"$log_root/setup-failure-$setup_failure.log" 2>&1; then
     setup_failure_status=0
   else
@@ -1567,15 +1745,26 @@ for setup_failure in before after; do
   assert_contains "$log_root/setup-failure-$setup_failure.log" 'Could not create isolated PostgreSQL backup operation.' \
     "setup-failure-$setup_failure-diagnostic"
   assert_operation_root_empty "setup-failure-$setup_failure-cleanup"
+  printf '%s\n' evidence-finalized >>"$setup_phase_trace"
+  printf '%s\n' assertion-started >>"$setup_phase_trace"
   if [ "$setup_failure" = after ]; then
-    assert_runner_contains_exact_line "$setup_cleanup_trace" cleaned setup-failure-after-token-cleanup
+    assert_marker_evidence "$setup_cleanup_trace" cleaned setup-failure-after-token-cleanup present yes \
+      "$setup_evidence_identity_before" "$setup_failure_status" success absent
+    assert_setup_phase_sequence setup-failure-after-phase-sequence setup-entered operation-directory-created \
+      setup-owner-written cleanup-owned-entered cleanup-owned-success evidence-finalized assertion-started
+  else
+    assert_marker_evidence "$setup_cleanup_trace" cleaned setup-failure-before-token-cleanup absent yes \
+      "$setup_evidence_identity_before" "$setup_failure_status" success absent
+    assert_setup_phase_sequence setup-failure-before-phase-sequence setup-entered cleanup-owned-entered cleanup-owned-success \
+      evidence-finalized assertion-started
   fi
+  remove_runner_or_root_fixture "$setup_cleanup_trace" "setup-failure-$setup_failure-cleanup-trace-cleanup"
+  remove_runner_or_root_fixture "$setup_phase_trace" "setup-failure-$setup_failure-phase-trace-cleanup"
 done
 pass_case operation-setup-failure-cleanup
 
 begin_case operation-setup-collision-signal
-run_setup_signal_case setup-collision-term collision TERM 143 preserved FAKE_COLLISION_SIGNAL=1
-assert_runner_contains_exact_line "$setup_cleanup_trace" preserved collision-token-mismatch-preserved
+run_setup_signal_case setup-collision-term collision TERM 143 preserved preserved FAKE_COLLISION_SIGNAL=1
 collision_stale_status=0
 if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
     "$root/scripts/backup/postgres-backup.sh" >"$log_root/setup-collision-stale.log" 2>&1; then
@@ -1589,13 +1778,22 @@ remove_test_operation_directory "$last_signal_operation" collision-operation-cle
 pass_case operation-setup-collision-signal
 
 begin_case operation-setup-cleanup-unavailable
-run_setup_signal_case setup-cleanup-unavailable-int after-creation INT 130 preserved FAKE_CLEANUP_UNAVAILABLE=1
+run_setup_signal_case setup-cleanup-unavailable-int after-creation INT 130 preserved none FAKE_CLEANUP_UNAVAILABLE=1
 assert_contains "$log_root/setup-signal-setup-cleanup-unavailable-int.log" \
   'Could not verify cleanup of PostgreSQL backup setup state.' cleanup-unavailable-diagnostic
 cleanup_warning_count="$(grep -Fc 'Could not verify cleanup of PostgreSQL backup setup state.' \
   "$log_root/setup-signal-setup-cleanup-unavailable-int.log" || :)"
 [ "$cleanup_warning_count" = 1 ] || fail_case cleanup-unavailable-marker-count one "$cleanup_warning_count"
+assert_stale_setup_blocks_next_backup setup-cleanup-unavailable-int
 remove_test_operation_directory "$last_signal_operation" cleanup-unavailable-operation-cleanup
+run_setup_signal_case setup-cleanup-unavailable-term after-creation TERM 143 preserved none FAKE_CLEANUP_UNAVAILABLE=1
+assert_contains "$log_root/setup-signal-setup-cleanup-unavailable-term.log" \
+  'Could not verify cleanup of PostgreSQL backup setup state.' cleanup-unavailable-term-diagnostic
+cleanup_term_warning_count="$(grep -Fc 'Could not verify cleanup of PostgreSQL backup setup state.' \
+  "$log_root/setup-signal-setup-cleanup-unavailable-term.log" || :)"
+[ "$cleanup_term_warning_count" = 1 ] || fail_case cleanup-unavailable-term-marker-count one "$cleanup_term_warning_count"
+assert_stale_setup_blocks_next_backup setup-cleanup-unavailable-term
+remove_test_operation_directory "$last_signal_operation" cleanup-unavailable-term-operation-cleanup
 pass_case operation-setup-cleanup-unavailable
 
 begin_case repository-warning
