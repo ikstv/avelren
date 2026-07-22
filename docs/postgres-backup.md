@@ -6,7 +6,7 @@ Backup використовує Restic repository `rclone:<private-remote>:Avelr
 
 ### Runtime і cancellation model
 
-`postgres-backup.sh` запускає detached `docker exec` усередині PostgreSQL-контейнера та підключає `pg_dump` до `127.0.0.1:5432` через SCRAM. Випадковий `PGPASSFILE` (`root:root 0600`), runner і PID/start-time identities існують лише в окремому `tmpfs` `/run/avelren-backup` (`root:root 0700`). Restart або recreate контейнера знищує цей runtime state; PostgreSQL data volume його не містить.
+`postgres-backup.sh` запускає detached `docker exec` усередині PostgreSQL-контейнера та підключає `pg_dump` до `127.0.0.1:5432` через SCRAM. Випадковий `PGPASSFILE` (`root:root 0600`), runner і PID/start-time identities існують лише в окремому `tmpfs` `/run/avelren-backup` (`root:root 0700`). Перед стартом backup fail-closed перевіряє declared Docker tmpfs options (`rw`, `noexec`, `nosuid`, `nodev`, `mode=0700`, `uid=0`, `gid=0`) і effective kernel mount через `/proc/self/mountinfo`: точний mount point, тип `tmpfs`, effective `rw,noexec,nosuid,nodev` та directory `root:root 0700`. Restart або recreate контейнера знищує цей runtime state; PostgreSQL data volume його не містить.
 
 Перед стартом нова операція fail-closed відмовляється працювати, якщо runtime має state іншої операції. Directory створюється атомарним `mkdir`; collision ніколи не перезаписує runner, heartbeat чи identity і повторюється не більше п’яти разів. `flock` додатково забороняє конкурентні host-side backup-и.
 
@@ -14,7 +14,7 @@ Backup використовує Restic repository `rclone:<private-remote>:Avelr
 
 Якщо Docker daemon недоступний, controller не вгадує PID і не видаляє неперевірений state. Після відновлення daemon живий watchdog завершує операцію; restart/recreate контейнера гарантовано очищає tmpfs. Paused/frozen контейнер не може виконувати traps або watchdog: credential залишається root-only у RAM tmpfs до unpause з cleanup або restart/recreate. Timer не слід перезапускати, доки попередній state не зник і контейнер не healthy.
 
-Custom dump створюється з `--no-owner --no-acl`, копіюється на host лише після status `0`, перевіряється `pg_restore --list`, шифрується Restic і після цього видаляється з root-only temporary directory. Backup не виконує SQL mutation. Prune є окремою командою: 7 daily, 4 weekly, 3 monthly; warning — 12 GiB, hard stop нових backup-ів — 14 GiB.
+Custom dump створюється з `--no-owner --no-acl`, копіюється на host лише після status `0`, перевіряється `pg_restore --list`, шифрується Restic і після цього видаляється з root-only temporary directory. Host dump створюється атомарно як root-owned regular file з exact mode `0600` незалежно від umask викликача; наявний symlink, FIFO, directory або regular file відхиляється. Backup не виконує SQL mutation. Prune є окремою командою: 7 daily, 4 weekly, 3 monthly; warning — 12 GiB, hard stop нових backup-ів — 14 GiB.
 
 ### Точна процедура install/upgrade
 
@@ -158,7 +158,7 @@ Backups use the Restic repository `rclone:<private-remote>:Avelren Backups/resti
 
 ### Runtime and cancellation model
 
-`postgres-backup.sh` starts a detached `docker exec` inside the PostgreSQL container and connects `pg_dump` to `127.0.0.1:5432` with SCRAM. The random `PGPASSFILE` (`root:root 0600`), runner, and PID/start-time identities exist only in dedicated tmpfs `/run/avelren-backup` (`root:root 0700`). Container restart or recreation destroys this runtime state; it never enters the PostgreSQL data volume.
+`postgres-backup.sh` starts a detached `docker exec` inside the PostgreSQL container and connects `pg_dump` to `127.0.0.1:5432` with SCRAM. The random `PGPASSFILE` (`root:root 0600`), runner, and PID/start-time identities exist only in dedicated tmpfs `/run/avelren-backup` (`root:root 0700`). Before starting, backup fails closed unless both the declared Docker tmpfs options (`rw`, `noexec`, `nosuid`, `nodev`, `mode=0700`, `uid=0`, `gid=0`) and the effective kernel mount from `/proc/self/mountinfo` agree: exact mount point, `tmpfs` filesystem, effective `rw,noexec,nosuid,nodev`, and a `root:root 0700` directory. Container restart or recreation destroys this runtime state; it never enters the PostgreSQL data volume.
 
 A new operation fails closed when runtime state from another operation exists. Atomic `mkdir` creation never overwrites another runner, heartbeat, or identity, and collision retry is bounded to five attempts. `flock` also prevents concurrent host-side backups.
 
@@ -166,7 +166,7 @@ On SIGINT/SIGTERM, the controller sends TERM only to the validated operation sup
 
 When the Docker daemon is unavailable, the controller neither guesses a PID nor removes unverified state. A live watchdog completes cancellation after daemon recovery; container restart/recreation guarantees tmpfs cleanup. A paused/frozen container cannot run traps or the watchdog: the credential remains root-only in RAM-backed tmpfs until unpause and cleanup or restart/recreation. Do not restart the timer until the prior state is gone and PostgreSQL is healthy.
 
-The custom dump uses `--no-owner --no-acl`, is copied to the host only after status `0`, is checked with `pg_restore --list`, encrypted with Restic, and removed from its root-only temporary directory. Backup executes no mutating SQL. Prune is separate: 7 daily, 4 weekly, and 3 monthly snapshots; warning at 12 GiB and hard stop for new backups at 14 GiB.
+The custom dump uses `--no-owner --no-acl`, is copied to the host only after status `0`, is checked with `pg_restore --list`, encrypted with Restic, and removed from its root-only temporary directory. The host dump is atomically created as a root-owned regular file with exact mode `0600`, independent of caller umask; an existing symlink, FIFO, directory, or regular file is rejected. Backup executes no mutating SQL. Prune is separate: 7 daily, 4 weekly, and 3 monthly snapshots; warning at 12 GiB and hard stop for new backups at 14 GiB.
 
 ### Exact install/upgrade procedure
 

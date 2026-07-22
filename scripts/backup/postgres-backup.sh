@@ -46,6 +46,62 @@ docker_timed() {
   timeout --signal=KILL "$docker_command_timeout" docker "$@"
 }
 
+declared_tmpfs_is_secure() {
+  local options option mode_count=0 uid_count=0 gid_count=0
+  local rw=0 noexec=0 nosuid=0 nodev=0
+  local -a declared_options
+  options="$(docker_timed inspect -f '{{with index .HostConfig.Tmpfs "/run/avelren-backup"}}{{.}}{{end}}' "$container")" || return 1
+  [ -n "$options" ] || return 1
+  local IFS=,
+  # Docker serializes tmpfs options as comma-separated exact tokens. Accept
+  # additional non-conflicting options, but reject a missing or contradictory
+  # required property rather than using substring matching.
+  read -r -a declared_options <<<"$options"
+  for option in "${declared_options[@]}"; do
+    case "$option" in
+      rw) rw=1 ;;
+      noexec) noexec=1 ;;
+      nosuid) nosuid=1 ;;
+      nodev) nodev=1 ;;
+      # Docker may canonicalize the Compose spelling mode=0700 to mode=700.
+      mode=0700|mode=700) ((mode_count += 1)) ;;
+      uid=0) ((uid_count += 1)) ;;
+      gid=0) ((gid_count += 1)) ;;
+      ro|exec|suid|dev|rw=*|noexec=*|nosuid=*|nodev=*|mode|uid|gid|mode=*|uid=*|gid=*) return 1 ;;
+      '') return 1 ;;
+      *) : ;;
+    esac
+  done
+  [ "$rw" -eq 1 ] && [ "$noexec" -eq 1 ] && [ "$nosuid" -eq 1 ] && [ "$nodev" -eq 1 ] && \
+    [ "$mode_count" -ge 1 ] && [ "$uid_count" -ge 1 ] && [ "$gid_count" -ge 1 ]
+}
+
+effective_tmpfs_is_secure() {
+  # /proc/self/mountinfo is kernel-backed. The canonical target contains no
+  # mountinfo escapes, so exact field equality rejects nested/similar mounts.
+  docker_timed exec --interactive --user 0 "$container" sh -s -- "$container_runtime_root" <<'EOF'
+set -eu
+target="$1"
+awk -v target="$target" '
+  function has(options, expected,  count, item) {
+    count = split(options, item, ",")
+    for (i = 1; i <= count; i++) if (item[i] == expected) return 1
+    return 0
+  }
+  $5 == target {
+    dash = 0
+    for (i = 7; i <= NF; i++) if ($i == "-") { dash = i; break }
+    if (!dash || dash == NF || $(dash + 1) != "tmpfs") exit 1
+    if (!has($6, "rw") || !has($6, "noexec") || !has($6, "nosuid") || !has($6, "nodev")) exit 1
+    found++
+  }
+  END { exit found == 1 ? 0 : 1 }
+' /proc/self/mountinfo
+[ -d "$target" ] && [ ! -L "$target" ]
+[ "$(stat -c '%u:%g:%a' "$target")" = '0:0:700' ]
+EOF
+}
+
 operation_state() {
   control state "$control_dir" "$operation_id" 2>/dev/null || printf '%s\n' unavailable
 }
@@ -142,8 +198,12 @@ flock -n 9 || { printf '%s\n' 'Another PostgreSQL backup is running.' >&2; exit 
 container="$("${compose[@]}" ps -q postgres)"
 [ -n "$container" ] || { printf '%s\n' 'PostgreSQL container is unavailable.' >&2; exit 1; }
 [ "$(docker_timed inspect -f '{{.State.Health.Status}}' "$container")" = healthy ] || { printf '%s\n' 'PostgreSQL is not healthy.' >&2; exit 1; }
-[ -n "$(docker_timed inspect -f '{{with index .HostConfig.Tmpfs "/run/avelren-backup"}}{{.}}{{end}}' "$container")" ] || {
-  printf '%s\n' 'PostgreSQL backup runtime is not tmpfs-backed.' >&2
+declared_tmpfs_is_secure || {
+  printf '%s\n' 'PostgreSQL backup runtime tmpfs configuration is unsafe.' >&2
+  exit 1
+}
+effective_tmpfs_is_secure || {
+  printf '%s\n' 'PostgreSQL backup runtime effective tmpfs mount is unsafe.' >&2
   exit 1
 }
 # Fail closed on any operation state left in this container boot. It may belong
@@ -166,6 +226,18 @@ RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$RESTIC_REPOSITORY_URL" restic
 tmpdir="$(mktemp -d -p "$tmp_root" avelren-pg-backup.XXXXXX)"
 chmod 700 "$tmpdir"
 dump="$tmpdir/avelren-$(date -u +%Y%m%dT%H%M%SZ).dump"
+umask 077
+set -o noclobber
+if ! exec {dump_fd}>"$dump"; then
+  set +o noclobber
+  printf '%s\n' 'Could not create secure host dump file.' >&2
+  exit 1
+fi
+set +o noclobber
+[ -f "$dump" ] && [ ! -L "$dump" ] && [ "$(stat -c '%u:%g:%a' "$dump")" = '0:0:600' ] || {
+  printf '%s\n' 'Host dump file permissions are unsafe.' >&2
+  exit 1
+}
 create_status=1
 for _ in 1 2 3 4 5; do
   operation_id="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
@@ -229,7 +301,8 @@ docker_timed exec --user 0 "$container" sh -eu -c '
   [ -f "$file" ] && [ ! -L "$file" ] && [ -s "$file" ]
   [ "$(stat -c "%u:%g:%a" "$file")" = "0:0:600" ]
   cat -- "$file"
-' sh "$control_dir/postgres.dump" >"$dump"
+' sh "$control_dir/postgres.dump" >&"$dump_fd"
+exec {dump_fd}>&-
 control cleanup "$control_dir" "$operation_id" >/dev/null
 operation_active=0
 [ -s "$dump" ] || { printf '%s\n' 'PostgreSQL dump is empty.' >&2; exit 1; }

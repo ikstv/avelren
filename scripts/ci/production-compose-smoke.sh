@@ -107,6 +107,29 @@ postgres_container="$("${compose[@]}" ps -q postgres)"
 runtime_root=/run/avelren-backup
 [ -n "$(docker inspect -f '{{with index .HostConfig.Tmpfs "/run/avelren-backup"}}{{.}}{{end}}' "$postgres_container")" ]
 [ "$("${compose[@]}" exec -T -u 0 postgres stat -c '%u:%g:%a' "$runtime_root")" = '0:0:700' ]
+# Verify the effective kernel mount as well as the Docker declaration. The
+# target is canonical and unescaped, so exact mountinfo field matching cannot
+# accept a nested or similarly named mount point.
+"${compose[@]}" exec -T -u 0 postgres sh -s -- "$runtime_root" <<'EOF'
+set -eu
+target="$1"
+awk -v target="$target" '
+  function has(options, expected,  count, item) {
+    count = split(options, item, ",")
+    for (i = 1; i <= count; i++) if (item[i] == expected) return 1
+    return 0
+  }
+  $5 == target {
+    dash = 0
+    for (i = 7; i <= NF; i++) if ($i == "-") { dash = i; break }
+    if (!dash || $(dash + 1) != "tmpfs") exit 1
+    if (!has($6, "rw") || !has($6, "noexec") || !has($6, "nosuid") || !has($6, "nodev")) exit 1
+    found++
+  }
+  END { exit found == 1 ? 0 : 1 }
+' /proc/self/mountinfo
+[ "$(stat -c '%u:%g:%a' "$target")" = '0:0:700' ]
+EOF
 
 # A real disposable copy of the mounted credential and its operation state must
 # disappear on container restart because the runtime is a dedicated tmpfs.

@@ -76,8 +76,18 @@ args="$*"
 case "$args" in
   *'ps -q postgres'*) printf '%s\n' fake-postgres ;;
   *State.Health.Status*) printf '%s\n' healthy ;;
-  *HostConfig.Tmpfs*) printf '%s\n' 'rw,mode=0700' ;;
-  *'exec --user 0 fake-postgres sh -eu -c'*postgres.dump*) printf '%s\n' fake-custom-format-dump ;;
+  *HostConfig.Tmpfs*) printf '%s\n' "${FAKE_TMPFS_OPTIONS:-rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0}" ;;
+  *'exec --interactive --user 0 fake-postgres sh -s -- /run/avelren-backup'*)
+    cat >/dev/null
+    exit "${FAKE_EFFECTIVE_TMPFS_STATUS:-0}"
+    ;;
+  *'exec --user 0 fake-postgres sh -eu -c'*postgres.dump*)
+    if [ "${FAKE_STREAM_FAIL:-0}" = 1 ]; then
+      printf '%s\n' partial-dump
+      exit 79
+    fi
+    printf '%s\n' fake-custom-format-dump
+    ;;
   *'exec --user 0 fake-postgres sh -eu -c'*)
     [ "${FAKE_STALE_RUNTIME:-0}" = 0 ] || exit 74
     ;;
@@ -125,7 +135,11 @@ set -eu
 printf '%s\n' "${RESTIC_REPOSITORY:-missing}" >>"$FAKE_RESTIC_REPOSITORIES"
 case "$*" in
   *snapshots*) exit 0 ;;
-  *backup*) [ "${FAKE_RESTIC_FAIL:-0}" = 1 ] && exit 42 || exit 0 ;;
+  *backup*)
+    dump="${!#}"
+    stat -c '%u:%g:%a' "$dump" >"$FAKE_DUMP_MODE"
+    [ "${FAKE_RESTIC_FAIL:-0}" = 1 ] && exit 42 || exit 0
+    ;;
   *restore*) target=''; previous=''; for arg in "$@"; do [ "$previous" = --target ] && target="$arg"; previous="$arg"; done; printf '%s\n' fake-dump >"$target/restored.dump" ;;
   *) exit 0 ;;
 esac
@@ -135,6 +149,38 @@ cat >"$fake_bin/pg_restore" <<'FAKE_PG_RESTORE'
 #!/usr/bin/env bash
 exit 0
 FAKE_PG_RESTORE
+cat >"$fake_bin/date" <<'FAKE_DATE'
+#!/usr/bin/env bash
+set -eu
+if [ "$*" = '-u +%Y%m%dT%H%M%SZ' ]; then
+  printf '%s\n' 20000101T000000Z
+else
+  exec /bin/date "$@"
+fi
+FAKE_DATE
+cat >"$fake_bin/mktemp" <<'FAKE_MKTEMP'
+#!/usr/bin/env bash
+set -eu
+if [ -n "${FAKE_FIXED_TMPDIR:-}" ] && [ "${1:-}" = -d ]; then
+  printf '%s\n' "$FAKE_FIXED_TMPDIR"
+else
+  exec /usr/bin/mktemp "$@"
+fi
+FAKE_MKTEMP
+cat >"$fake_bin/chmod" <<'FAKE_CHMOD'
+#!/usr/bin/env bash
+set -eu
+target="${!#}"
+if [ "${FAKE_DUMP_CHMOD_FAIL:-0}" = 1 ] && [[ "$target" == *avelren-20000101T000000Z.dump ]]; then exit 71; fi
+exec /usr/bin/chmod "$@"
+FAKE_CHMOD
+cat >"$fake_bin/stat" <<'FAKE_STAT'
+#!/usr/bin/env bash
+set -eu
+target="${!#}"
+if [ "${FAKE_DUMP_STAT_FAIL:-0}" = 1 ] && [[ "$target" == *avelren-20000101T000000Z.dump ]]; then exit 72; fi
+exec /usr/bin/stat "$@"
+FAKE_STAT
 chmod 755 "$fake_bin"/*
 
 config="$test_root/rclone.conf"
@@ -151,6 +197,7 @@ restic_repositories="$test_root/restic-repositories"
 touch "$rclone_calls" "$restic_repositories"
 root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$test_root/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$log_root/db-created" "FAKE_DB_DROPPED=$log_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories" "FAKE_COLLISION_PROOF=$log_root/collision-proof")
 root_env+=("FAKE_DOCKER_STATE=$test_root/docker-state")
+root_env+=("FAKE_DUMP_MODE=$log_root/dump-mode")
 runner=()
 [ "$(id -u)" -eq 0 ] || runner=(sudo)
 validator="$root/scripts/backup/restic-password-file.sh"
@@ -228,6 +275,130 @@ if grep -Fvxq 'rclone:test-remote:Avelren Backups/restic' "$restic_repositories"
 below_warning=$((12 * 1024 * 1024 * 1024 - 1))
 at_warning=$((12 * 1024 * 1024 * 1024))
 at_hard_stop=$((14 * 1024 * 1024 * 1024))
+
+assert_tmpfs_rejected() {
+  local case_name="$1" expected_message="$2"
+  shift 2
+  rm -f "$test_root/docker-state"
+  set +e
+  "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$@" \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/tmpfs-$case_name.log" 2>&1
+  local status=$?
+  set -e
+  [ "$status" -ne 0 ]
+  grep -Fq "$expected_message" "$log_root/tmpfs-$case_name.log"
+  [ ! -e "$test_root/docker-state" ]
+  backup_tmp_is_empty
+  if grep -Fq 'fixture-password' "$log_root/tmpfs-$case_name.log"; then exit 1; fi
+}
+
+# Required declared tokens are order-independent and harmless additions remain
+# compatible, but each missing, deceptive, malformed, or contradictory value
+# must fail before operation creation.
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
+  FAKE_TMPFS_OPTIONS='gid=0,size=16m,nodev,rw,mode=0700,noexec,uid=0,nosuid' \
+  "$root/scripts/backup/postgres-backup.sh" >"$log_root/tmpfs-reordered.log" 2>&1
+backup_tmp_is_empty
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
+  FAKE_TMPFS_OPTIONS='rw,noexec,nosuid,nodev,mode=700,uid=0,gid=0,size=16m' \
+  "$root/scripts/backup/postgres-backup.sh" >"$log_root/tmpfs-canonical-mode.log" 2>&1
+backup_tmp_is_empty
+for missing_option in noexec nosuid nodev; do
+  options='rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=0'
+  options="${options//$missing_option,/}"
+  assert_tmpfs_rejected "missing-$missing_option" 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+    "FAKE_TMPFS_OPTIONS=$options"
+done
+assert_tmpfs_rejected wrong-mode 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+  'FAKE_TMPFS_OPTIONS=rw,noexec,nosuid,nodev,mode=07000,uid=0,gid=0'
+assert_tmpfs_rejected wrong-uid 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+  'FAKE_TMPFS_OPTIONS=rw,noexec,nosuid,nodev,mode=0700,uid=1,gid=0'
+assert_tmpfs_rejected wrong-gid 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+  'FAKE_TMPFS_OPTIONS=rw,noexec,nosuid,nodev,mode=0700,uid=0,gid=1'
+assert_tmpfs_rejected deceptive-substring 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+  'FAKE_TMPFS_OPTIONS=rw,noexec,nosuid,nodev,mode=07000,uid=00,gid=00'
+assert_tmpfs_rejected contradictory-exec 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+  'FAKE_TMPFS_OPTIONS=rw,noexec,exec,nosuid,nodev,mode=0700,uid=0,gid=0'
+assert_tmpfs_rejected malformed-boolean 'PostgreSQL backup runtime tmpfs configuration is unsafe.' \
+  'FAKE_TMPFS_OPTIONS=rw,noexec=1,nosuid,nodev,mode=0700,uid=0,gid=0'
+assert_tmpfs_rejected effective-not-tmpfs 'PostgreSQL backup runtime effective tmpfs mount is unsafe.' \
+  'FAKE_EFFECTIVE_TMPFS_STATUS=1'
+
+# The historical non-empty HostConfig check accepts the missing-noexec case;
+# retain this proof so the negative matrix cannot silently regress to it.
+legacy_backup="$test_root/legacy-postgres-backup.sh"
+legacy_ref=
+while read -r candidate; do
+  if git -C "$root" show "$candidate:scripts/backup/postgres-backup.sh" 2>/dev/null \
+      | grep -Fq 'PostgreSQL backup runtime is not tmpfs-backed.'; then
+    legacy_ref="$candidate"
+    break
+  fi
+done < <(git -C "$root" rev-list HEAD)
+[ -n "$legacy_ref" ]
+git -C "$root" show "$legacy_ref:scripts/backup/postgres-backup.sh" >"$legacy_backup"
+cp "$root/scripts/backup/restic-password-file.sh" "$root/scripts/backup/restic-repository.sh" \
+  "$root/scripts/backup/postgres-tcp-dump.sh" "$root/scripts/backup/postgres-backup-control.sh" "$test_root/"
+chmod 700 "$legacy_backup"
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
+  FAKE_TMPFS_OPTIONS='rw,nosuid,nodev,mode=0700,uid=0,gid=0' \
+  "$legacy_backup" >"$log_root/legacy-nonempty-only.log" 2>&1
+grep -Fq 'PostgreSQL backup completed.' "$log_root/legacy-nonempty-only.log"
+backup_tmp_is_empty
+
+assert_host_dump_rejected() {
+  local case_name="$1"
+  local fixed_tmp="$backup_tmp/fixed-$case_name"
+  local target="$fixed_tmp/avelren-20000101T000000Z.dump"
+  mkdir -m 700 "$fixed_tmp"
+  case "$case_name" in
+    symlink) ln -s /dev/null "$target" ;;
+    fifo) mkfifo "$target" ;;
+    directory) mkdir "$target" ;;
+    regular) touch "$target"; chmod 600 "$target" ;;
+    *) exit 1 ;;
+  esac
+  set +e
+  umask 0022
+  "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-$case_name.log" 2>&1
+  local status=$?
+  set -e
+  [ "$status" -ne 0 ]
+  grep -Fq 'Could not create secure host dump file.' "$log_root/host-$case_name.log"
+  [ ! -e "$fixed_tmp" ]
+  backup_tmp_is_empty
+}
+
+rm -f "$log_root/dump-mode"
+umask 0022
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
+  "$root/scripts/backup/postgres-backup.sh" >"$log_root/explicit-dump-mode.log" 2>&1
+[ "$(cat "$log_root/dump-mode")" = '0:0:600' ]
+backup_tmp_is_empty
+assert_host_dump_rejected symlink
+assert_host_dump_rejected fifo
+assert_host_dump_rejected directory
+assert_host_dump_rejected regular
+for injected_failure in FAKE_DUMP_CHMOD_FAIL FAKE_DUMP_STAT_FAIL; do
+  fixed_tmp="$backup_tmp/fixed-$injected_failure"
+  mkdir -m 700 "$fixed_tmp"
+  set +e
+  "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" "$injected_failure=1" \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-$injected_failure.log" 2>&1
+  status=$?
+  set -e
+  [ "$status" -ne 0 ]
+  [ ! -e "$fixed_tmp" ]
+  backup_tmp_is_empty
+done
+set +e
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_STREAM_FAIL=1 \
+  "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-partial-stream.log" 2>&1
+partial_stream_status=$?
+set -e
+[ "$partial_stream_status" -ne 0 ]
+backup_tmp_is_empty
 
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$root/scripts/backup/postgres-backup.sh" >"$log_root/below-warning.log" 2>&1
 capture_is_runner_readable "$log_root/below-warning.log"
