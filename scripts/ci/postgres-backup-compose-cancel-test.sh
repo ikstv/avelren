@@ -316,20 +316,8 @@ run_cancel_case TERM 143 stopped
 # outer shell can exit while docker compose exec and the inner dump remain alive.
 legacy_dir="$test_root/legacy"
 install -d -m 700 "$legacy_dir"
-legacy_ref=
-while read -r candidate; do
-  if git -c "safe.directory=$repository_root" -C "$repository_root" show "$candidate:scripts/backup/postgres-backup.sh" 2>/dev/null \
-      | grep -F 'exec -T' >/dev/null && \
-     git -c "safe.directory=$repository_root" -C "$repository_root" show "$candidate:scripts/backup/postgres-tcp-dump.sh" 2>/dev/null \
-      | grep -F 'PGPASSFILE=' >/dev/null; then
-    legacy_ref="$candidate"
-    break
-  fi
-done < <(git -c "safe.directory=$repository_root" -C "$repository_root" rev-list HEAD)
-[ -n "$legacy_ref" ]
-git -c "safe.directory=$repository_root" -C "$repository_root" show "$legacy_ref:scripts/backup/postgres-backup.sh" >"$legacy_dir/postgres-backup.sh"
-git -c "safe.directory=$repository_root" -C "$repository_root" show "$legacy_ref:scripts/backup/postgres-tcp-dump.sh" >"$legacy_dir/postgres-tcp-dump.sh"
-cp "$repository_root/scripts/backup/restic-password-file.sh" "$repository_root/scripts/backup/restic-repository.sh" "$legacy_dir/"
+cp "$repository_root/scripts/ci/fixtures/postgres-backup-attached.sh" "$legacy_dir/postgres-backup.sh"
+cp "$repository_root/scripts/ci/fixtures/postgres-tcp-dump-attached.sh" "$legacy_dir/postgres-tcp-dump-attached.sh"
 chmod 700 "$legacy_dir/"*.sh
 grep -Fq '"${compose[@]}" exec -T -u 0 postgres sh -s --' "$legacy_dir/postgres-backup.sh"
 

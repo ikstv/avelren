@@ -210,9 +210,6 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-          # The cancellation mutation intentionally executes a historical
-          # attached implementation; keep its source available in CI.
-          fetch-depth: 0
 
       - name: Перевірити production Compose / Validate production Compose
         run: docker compose --env-file .env.production.example config --quiet
@@ -232,18 +229,15 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-          # The safety test proves its negative mutation against historical
-          # source, which is outside the default shallow checkout.
-          fetch-depth: 0
 
       - name: ShellCheck
         run: |
           sudo apt-get update
           sudo apt-get install --yes shellcheck strace
-          shellcheck scripts/backup/*.sh scripts/ci/secure-lock-test.sh scripts/ci/postgres-backup-diagnostics.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-restore-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
+          shellcheck scripts/backup/*.sh scripts/ci/fixtures/*.sh scripts/ci/secure-lock-test.sh scripts/ci/postgres-backup-diagnostics.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-restore-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
 
       - name: Bash syntax
-        run: bash -n scripts/backup/*.sh scripts/ci/secure-lock-test.sh scripts/ci/postgres-backup-diagnostics.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-restore-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
+        run: bash -n scripts/backup/*.sh scripts/ci/fixtures/*.sh scripts/ci/secure-lock-test.sh scripts/ci/postgres-backup-diagnostics.sh scripts/ci/postgres-backup-test.sh scripts/ci/postgres-restore-test.sh scripts/ci/postgres-backup-auth-test.sh scripts/ci/postgres-backup-compose-cancel-test.sh scripts/ci/production-compose-smoke.sh
 
       - name: Secure host-lock namespace tests
         run: timeout --signal=TERM --kill-after=5s 2m sudo ./scripts/ci/secure-lock-test.sh
