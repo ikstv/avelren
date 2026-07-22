@@ -119,10 +119,10 @@ diagnostics_init() {
       printf '%s\n' 'Invalid diagnostic case ID.' >&2
       return 2
     }
-    [ "$description" != "$specification" ] && [ -n "$description" ] || {
+    if [ "$description" = "$specification" ] || [ -z "$description" ]; then
       printf '%s\n' 'Missing diagnostic case description.' >&2
       return 2
-    }
+    fi
     if diagnostics_case_registered "$case_id"; then
       printf '%s\n' 'Duplicate diagnostic case ID.' >&2
       return 2
@@ -209,10 +209,10 @@ begin_case() {
 
 pass_case() {
   local case_id="$1"
-  [ "$diagnostics_case_open" -eq 1 ] && [ "$diagnostics_current_case" = "$case_id" ] || {
+  if [ "$diagnostics_case_open" -ne 1 ] || [ "$diagnostics_current_case" != "$case_id" ]; then
     diagnostics_record_failure 2 "$LINENO" pass-case-mismatch status 0 2
     exit 2
-  }
+  fi
   diagnostics_completed_cases+=("$case_id")
   diagnostics_report_line "completed_case=$case_id"
   printf 'PASS: %s\n' "$case_id"
@@ -357,21 +357,21 @@ assert_nonzero_status() {
 assert_file_exists() {
   local path="$1" assertion="$2"
   diagnostics_current_assertion="$assertion"
-  [ -f "$path" ] && [ ! -L "$path" ] || {
+  if [ ! -f "$path" ] || [ -L "$path" ]; then
     diagnostics_record_failure 1 "${BASH_LINENO[0]}" "$assertion" file present absent
     trap - ERR
     exit 1
-  }
+  fi
 }
 
 assert_file_absent() {
   local path="$1" assertion="$2"
   diagnostics_current_assertion="$assertion"
-  [ ! -e "$path" ] && [ ! -L "$path" ] || {
+  if [ -e "$path" ] || [ -L "$path" ]; then
     diagnostics_record_failure 1 "${BASH_LINENO[0]}" "$assertion" file absent present
     trap - ERR
     exit 1
-  }
+  fi
 }
 
 assert_contains() {
@@ -574,10 +574,10 @@ diagnostics_guard() {
   local skipped_id skipped_reason
   local -A indexed_cases=() terminal_cases=()
   report_dir="${report%/*}"
-  [ "$report_dir" != "$report" ] && [ "${report##*/}" = report.txt ] || { printf '%s\n' 'Diagnostic report path is invalid.' >&2; return 1; }
+  if [ "$report_dir" = "$report" ] || [ "${report##*/}" != report.txt ]; then printf '%s\n' 'Diagnostic report path is invalid.' >&2; return 1; fi
   [ "${report_dir##*/}" = postgres-backup-safety-diagnostics ] || { printf '%s\n' 'Diagnostic directory name is invalid.' >&2; return 1; }
-  [ -d "$report_dir" ] && [ ! -L "$report_dir" ] || { printf '%s\n' 'Diagnostic directory is unsafe.' >&2; return 1; }
-  [ -f "$report" ] && [ ! -L "$report" ] || { printf '%s\n' 'Diagnostic report is not a regular file.' >&2; return 1; }
+  if [ ! -d "$report_dir" ] || [ -L "$report_dir" ]; then printf '%s\n' 'Diagnostic directory is unsafe.' >&2; return 1; fi
+  if [ ! -f "$report" ] || [ -L "$report" ]; then printf '%s\n' 'Diagnostic report is not a regular file.' >&2; return 1; fi
   expected_uid="$(id -u)"
   expected_gid="$(id -g)"
   [ "$(stat -c '%a' "$report_dir")" = 700 ] || { printf '%s\n' 'Diagnostic directory mode is unsafe.' >&2; return 1; }
@@ -652,7 +652,10 @@ diagnostics_guard() {
       assertion_id) diagnostics_valid_id "$value" || return 1; ((assertion_count += 1)) ;;
       script) [ "$value" = "$diagnostics_script" ] || return 1; ((script_count += 1)) ;;
       line) [[ "$value" =~ ^[0-9]+$ ]] || return 1; ((line_count += 1)) ;;
-      exit_status) [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -le 255 ] || return 1; ((status_count += 1)) ;;
+      exit_status)
+        if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -gt 255 ]; then return 1; fi
+        ((status_count += 1))
+        ;;
       expected_kind) [[ "$value" =~ ^(assertion|file|marker|mode|owner|owner-mode|status|value)$ ]] || return 1; expected_kind_value="$value"; ((kind_count += 1)) ;;
       expected_value) [[ "$value" =~ ^[A-Za-z0-9:._-]{1,96}$ ]] || return 1; expected_value_value="$value"; ((expected_count += 1)) ;;
       actual_value) [[ "$value" =~ ^[A-Za-z0-9:._-]{1,96}$ ]] || return 1; actual_value_value="$value"; ((actual_count += 1)) ;;
@@ -665,7 +668,7 @@ diagnostics_guard() {
   for value in "$schema_count" "$result_count" "$case_count" "$phase_count" "$assertion_count" "$script_count" "$line_count" "$status_count" "$kind_count" "$expected_count" "$actual_count" "$temp_count" "$cleanup_count" "$overall_count"; do
     [ "$value" -eq 1 ] || { printf '%s\n' 'Diagnostic report has missing or duplicate fields.' >&2; return 1; }
   done
-  [ "$index_count" -gt 0 ] && [ "$terminal_count" -eq "$index_count" ] || { printf '%s\n' 'Diagnostic case accounting is incomplete.' >&2; return 1; }
+  if [ "$index_count" -le 0 ] || [ "$terminal_count" -ne "$index_count" ]; then printf '%s\n' 'Diagnostic case accounting is incomplete.' >&2; return 1; fi
   diagnostics_value_allowed "$expected_kind_value" "$expected_value_value" || return 1
   diagnostics_value_allowed "$expected_kind_value" "$actual_value_value" || return 1
   if [ "$failure_phase_value" != timeout ]; then
