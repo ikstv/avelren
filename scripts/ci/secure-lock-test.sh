@@ -223,8 +223,11 @@ if [ -e /run/lock ] && [ ! -L /run/lock ]; then
   global_lock_before="$(stat -c '%d:%i:%u:%g:%a' -- /run/lock)"
 fi
 
+# The following two patterns are literal source-code contracts.
+# shellcheck disable=SC2016
 grep -Fq 'lock_file="${AVELREN_BACKUP_LOCK_FILE:-/run/avelren/postgres-backup.lock}"' "$backup_script" ||
   fail 'backup default lock path is incorrect'
+# shellcheck disable=SC2016
 grep -Fq 'lock_file="${AVELREN_BACKUP_LOCK_FILE:-/run/avelren/postgres-restore.lock}"' "$restore_script" ||
   fail 'restore default lock path is incorrect'
 if grep -Eq ':-/run/lock/[^/]+\.lock' "$backup_script" "$restore_script"; then
@@ -252,9 +255,9 @@ else
 fi
 assert_status 0 "$fresh_status" fresh-lock
 [ -e "$fresh_reached" ] || fail 'fresh lock did not reach the protected operation'
-[ -d "$lock_directory" ] && [ ! -L "$lock_directory" ] || fail 'fresh namespace is not a directory'
+if [ ! -d "$lock_directory" ] || [ -L "$lock_directory" ]; then fail 'fresh namespace is not a directory'; fi
 [ "$(stat -c '%u:%g:%a' "$lock_directory")" = '0:0:700' ] || fail 'fresh namespace metadata is unsafe'
-[ -f "$backup_lock" ] && [ ! -L "$backup_lock" ] || fail 'fresh lock is not regular'
+if [ ! -f "$backup_lock" ] || [ -L "$backup_lock" ]; then fail 'fresh lock is not regular'; fi
 [ "$(stat -c '%h:%u:%g:%a' "$backup_lock")" = '1:0:0:600' ] || fail 'fresh lock metadata is unsafe'
 fresh_open_lines="$(grep -F 'postgres-backup.lock' "$fresh_trace" | grep -F 'O_CREAT' || true)"
 fresh_open_count="$(printf '%s\n' "$fresh_open_lines" | grep -c . || true)"
@@ -301,8 +304,9 @@ mkdir -m 0755 "$test_root/ancestor-target"
 ln -s "$test_root/ancestor-target" "$test_root/ancestor-link"
 ancestor_lock="$test_root/ancestor-link/avelren/postgres-backup.lock"
 expect_unsafe backup "$ancestor_lock" 'PostgreSQL backup lock directory is unsafe.' directory-ancestor-symlink
-[ ! -e "$test_root/ancestor-target/avelren" ] && [ ! -L "$test_root/ancestor-target/avelren" ] ||
+if [ -e "$test_root/ancestor-target/avelren" ] || [ -L "$test_root/ancestor-target/avelren" ]; then
   fail 'namespace was created through an intermediate symlink'
+fi
 pass lock-08b-ancestor-symlink-rejected
 
 reset_namespace
@@ -442,7 +446,9 @@ quarantine="$test_root/replacement-original"
 expect_unsafe backup "$backup_lock" 'PostgreSQL backup lock file is unsafe.' lock-replacement \
   "PATH=$fake_bin:$PATH" AVELREN_TEST_FLOCK_REPLACE=1 AVELREN_TEST_INJECT_LOCK="$backup_lock" \
   AVELREN_TEST_INJECTED="$injected" AVELREN_TEST_QUARANTINE="$quarantine"
-[ -e "$injected" ] && [ -f "$backup_lock" ] && [ -f "$quarantine" ] || fail 'post-flock replacement injector did not preserve both objects'
+if [ ! -e "$injected" ] || [ ! -f "$backup_lock" ] || [ ! -f "$quarantine" ]; then
+  fail 'post-flock replacement injector did not preserve both objects'
+fi
 [ "$(stat -c '%d:%i' "$backup_lock")" != "$(stat -c '%d:%i' "$quarantine")" ] || fail 'replacement did not change identity'
 [ "$(cat "$quarantine")" = replacement-original ] || fail 'replacement changed original content'
 pass lock-24-replacement-rejected
@@ -508,7 +514,10 @@ fi
 pass lock-34-no-global-lock-repair-instructions
 
 for script in "$backup_script" "$restore_script"; do
+  # The following two patterns are literal source-code contracts.
+  # shellcheck disable=SC2016
   grep -Fq '. "$script_dir/secure-lock-file.sh"' "$script" || fail "$(basename "$script") does not source the production lock helper"
+  # shellcheck disable=SC2016
   grep -Fq 'avelren_secure_lock_acquire "$lock_file"' "$script" || fail "$(basename "$script") does not call the production lock helper"
 done
 pass lock-35-production-entrypoints-use-helper

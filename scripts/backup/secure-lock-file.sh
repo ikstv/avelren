@@ -95,7 +95,7 @@ avelren_secure_lock_file_identity() {
 
 avelren_secure_lock_prepare_directory() {
   local lock_path="$1" canonical lock_directory lock_name parent directory_name
-  local parent_identity parent_fd= directory_reference directory_identity
+  local parent_identity parent_fd='' directory_reference directory_identity
 
   [ "$(id -u)" -eq 0 ] || return 73
   case "$lock_path" in /*) ;; *) return 73 ;; esac
@@ -163,7 +163,7 @@ avelren_secure_lock_prepare_directory() {
 
 avelren_secure_lock_acquire() {
   local lock_path="$1" lock_directory lock_name lock_reference
-  local file_identity= saved_umask noclobber_was_set=0 create_status=0 flock_status=0
+  local file_identity='' saved_umask noclobber_was_set=0 create_status=0 flock_status=0
 
   avelren_secure_lock_close
   # Dynamic descriptors must survive the command that allocates them.
@@ -174,7 +174,10 @@ avelren_secure_lock_acquire() {
   lock_reference="$AVELREN_SECURE_LOCK_DIRECTORY_REFERENCE/$lock_name"
 
   if [ -L "$lock_reference" ] || [ -e "$lock_reference" ]; then
-    [ ! -L "$lock_reference" ] && [ -f "$lock_reference" ] || { avelren_secure_lock_close; return 74; }
+    if [ -L "$lock_reference" ] || [ ! -f "$lock_reference" ]; then
+      avelren_secure_lock_close
+      return 74
+    fi
     file_identity="$(stat -c '%d:%i:%h:%u:%g:%a' -- "$lock_reference" 2>/dev/null)" || {
       avelren_secure_lock_close
       return 74

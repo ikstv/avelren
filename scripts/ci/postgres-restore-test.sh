@@ -754,8 +754,9 @@ assert_status 1 "$restore_lock_directory_status" restore-lock-directory-status
 [ "$("${root_runner[@]}" stat -c '%d:%i:%u:%g:%a' -- "$restore_lock_directory_unsafe")" = \
   "$restore_lock_directory_identity" ] || fail 'restore unsafe lock directory was repaired'
 "${root_runner[@]}" rmdir -- "$restore_lock_directory_unsafe"
-[ ! -e "$restore_lock_directory_unsafe" ] && [ ! -L "$restore_lock_directory_unsafe" ] ||
+if [ -e "$restore_lock_directory_unsafe" ] || [ -L "$restore_lock_directory_unsafe" ]; then
   fail 'restore unsafe lock directory cleanup failed'
+fi
 pass restore-lock-directory-unsafe
 
 reset_case
