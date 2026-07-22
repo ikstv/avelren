@@ -210,7 +210,9 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-          fetch-depth: 10
+          # The cancellation mutation intentionally executes a historical
+          # attached implementation; keep its source available in CI.
+          fetch-depth: 0
 
       - name: Перевірити production Compose / Validate production Compose
         run: docker compose --env-file .env.production.example config --quiet
@@ -230,6 +232,9 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          # The safety test proves its negative mutation against historical
+          # source, which is outside the default shallow checkout.
+          fetch-depth: 0
 
       - name: ShellCheck
         run: |
