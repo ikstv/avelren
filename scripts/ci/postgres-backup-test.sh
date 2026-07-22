@@ -317,6 +317,12 @@ case "$args" in
     argument_count="${#arguments[@]}"
     setup_token="${arguments[$((argument_count - 1))]}"
     control_dir="${arguments[$((argument_count - 2))]}"
+    if ! [[ "$setup_token" =~ ^[a-f0-9]{32}$ && "${control_dir##*/}" == operation.* ]]; then
+      # Historical fixtures intentionally exercise the pre-token setup
+      # protocol; keep that negative proof independent from current hooks.
+      printf '%s\n' starting >"$FAKE_DOCKER_STATE"
+      exit 0
+    fi
     operation="$(operation_path "$control_dir")"
     printf '%s\n' "${control_dir##*/}" >"${FAKE_SETUP_CONTROL_FILE:-/dev/null}"
     if [ "${FAKE_SETUP_FAIL:-}" = before ]; then exit 75; fi
