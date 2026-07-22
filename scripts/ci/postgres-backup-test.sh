@@ -84,6 +84,7 @@ case "$args" in
   *'exec --user 0 fake-postgres sh -eu -c'*postgres.dump*)
     if [ "${FAKE_STREAM_FAIL:-0}" = 1 ]; then
       printf '%s\n' partial-dump
+      printf '%s\n' 'Injected PostgreSQL dump stream failure.' >&2
       exit 79
     fi
     printf '%s\n' fake-custom-format-dump
@@ -138,7 +139,11 @@ case "${1:-}" in
   backup)
     dump="${!#}"
     stat -c '%u:%g:%a' "$dump" >"$FAKE_DUMP_MODE"
-    [ "${FAKE_RESTIC_FAIL:-0}" = 1 ] && exit 42 || exit 0
+    if [ "${FAKE_RESTIC_FAIL:-0}" = 1 ]; then
+      printf '%s\n' 'Injected Restic backup failure.' >&2
+      exit 42
+    fi
+    exit 0
     ;;
   restore) target=''; previous=''; for arg in "$@"; do [ "$previous" = --target ] && target="$arg"; previous="$arg"; done; printf '%s\n' fake-dump >"$target/restored.dump" ;;
   *) exit 0 ;;
@@ -171,14 +176,20 @@ cat >"$fake_bin/chmod" <<'FAKE_CHMOD'
 #!/usr/bin/env bash
 set -eu
 target="${!#}"
-if [ "${FAKE_DUMP_CHMOD_FAIL:-0}" = 1 ] && [[ "$target" == *avelren-20000101T000000Z.dump ]]; then exit 71; fi
+if [ "${FAKE_TMPDIR_CHMOD_FAIL:-0}" = 1 ] && [ -n "${FAKE_FIXED_TMPDIR:-}" ] && [ "$target" = "$FAKE_FIXED_TMPDIR" ]; then
+  printf '%s\n' 'Injected temporary directory chmod failure.' >&2
+  exit 71
+fi
 exec /usr/bin/chmod "$@"
 FAKE_CHMOD
 cat >"$fake_bin/stat" <<'FAKE_STAT'
 #!/usr/bin/env bash
 set -eu
 target="${!#}"
-if [ "${FAKE_DUMP_STAT_FAIL:-0}" = 1 ] && [[ "$target" == *avelren-20000101T000000Z.dump ]]; then exit 72; fi
+if [ "${FAKE_DUMP_STAT_FAIL:-0}" = 1 ] && [[ "$target" == *avelren-20000101T000000Z.dump ]]; then
+  printf '%s\n' 'Injected host dump stat failure.' >&2
+  exit 72
+fi
 exec /usr/bin/stat "$@"
 FAKE_STAT
 chmod 755 "$fake_bin"/*
@@ -382,15 +393,33 @@ assert_host_dump_rejected symlink
 assert_host_dump_rejected fifo
 assert_host_dump_rejected directory
 assert_host_dump_rejected regular
-for injected_failure in FAKE_DUMP_CHMOD_FAIL FAKE_DUMP_STAT_FAIL; do
+# The atomic dump mode comes from umask plus the single noclobber open; there
+# is deliberately no path-based dump chmod. Exercise the actual tmpdir chmod
+# failure and the dump stat failure, and prove that each injector was reached.
+for injected_failure in FAKE_TMPDIR_CHMOD_FAIL FAKE_DUMP_STAT_FAIL; do
   fixed_tmp="$backup_tmp/fixed-$injected_failure"
+  case "$injected_failure" in
+    FAKE_TMPDIR_CHMOD_FAIL)
+      expected_status=71
+      expected_marker='Injected temporary directory chmod failure.'
+      ;;
+    FAKE_DUMP_STAT_FAIL)
+      expected_status=1
+      expected_marker='Injected host dump stat failure.'
+      ;;
+    *) exit 1 ;;
+  esac
   "${runner[@]}" mkdir -m 700 "$fixed_tmp"
   set +e
   "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_FIXED_TMPDIR="$fixed_tmp" "$injected_failure=1" \
     "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-$injected_failure.log" 2>&1
   status=$?
   set -e
-  [ "$status" -ne 0 ]
+  [ "$status" -eq "$expected_status" ]
+  grep -Fq "$expected_marker" "$log_root/host-$injected_failure.log"
+  if [ "$injected_failure" = FAKE_DUMP_STAT_FAIL ]; then
+    grep -Fq 'Host dump file permissions are unsafe.' "$log_root/host-$injected_failure.log"
+  fi
   [ ! -e "$fixed_tmp" ]
   backup_tmp_is_empty
 done
@@ -399,7 +428,8 @@ set +e
   "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-partial-stream.log" 2>&1
 partial_stream_status=$?
 set -e
-[ "$partial_stream_status" -ne 0 ]
+[ "$partial_stream_status" -eq 79 ]
+grep -Fq 'Injected PostgreSQL dump stream failure.' "$log_root/host-partial-stream.log"
 backup_tmp_is_empty
 
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$root/scripts/backup/postgres-backup.sh" >"$log_root/below-warning.log" 2>&1
@@ -446,9 +476,10 @@ set +e
 "${runner[@]}" env "${root_env[@]}" FAKE_RESTIC_FAIL=1 "$root/scripts/backup/postgres-backup.sh" >"$log_root/failure.log" 2>&1
 failure_status=$?
 set -e
-[ "$failure_status" -ne 0 ]
+[ "$failure_status" -eq 42 ]
 backup_tmp_is_empty
 capture_is_runner_readable "$log_root/failure.log"
+grep -Fq 'Injected Restic backup failure.' "$log_root/failure.log"
 if grep -Eq 'fake-secret|password|token' "$log_root/below-warning.log" "$log_root/at-warning.log" "$log_root/at-hard-stop.log" "$log_root/failure.log"; then
   exit 1
 fi
