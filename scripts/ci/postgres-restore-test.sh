@@ -842,15 +842,20 @@ run_create_client_handoff_case() {
   local signal="$1" expected_status="$2" label="restore-create-client-handoff-${1,,}"
   local ready="$state_root/$label-ready" pids="$state_root/$label-pids"
   local release="$state_root/$label-release" result="$state_root/$label-result"
-  local child_ready="$state_root/$label-child-ready" launch_pid creator_pid child_pid status=0
+  local child_ready="$state_root/$label-child-ready" launch_pid creator_pid published_outer child_pid status=0
   rm -f -- "$ready" "$pids" "$release" "$result" "$child_ready"
   : >"$result"
-  setsid --wait "$test_root/create-client-handoff.sh" "$ready" "$pids" "$release" "$result" "$child_ready" &
+  : >"$outer_pid_file"
+  AVELREN_TEST_OUTER_PID_FILE="$outer_pid_file" \
+    setsid --wait python3 "$test_root/signal-launch.py" \
+      "$test_root/create-client-handoff.sh" "$ready" "$pids" "$release" "$result" "$child_ready" &
   launch_pid=$!
   active_launch_pid="$launch_pid"
   wait_for_marker "$ready" "$launch_pid" || fail "$label (launch barrier was not reached)"
   IFS=: read -r creator_pid child_pid <"$pids"
   case "$creator_pid" in ''|*[!0-9]*) fail "$label (invalid creator pid)" ;; esac
+  published_outer="$(cat "$outer_pid_file")"
+  [ "$published_outer" = "$creator_pid" ] || fail "$label (signal-reset identity mismatch)"
   active_outer_pid="$creator_pid"
   case "$child_pid" in ''|*[!0-9]*) fail "$label (invalid child pid)" ;; esac
   kill -s "$signal" "$creator_pid"
