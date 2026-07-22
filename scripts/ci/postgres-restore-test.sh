@@ -361,10 +361,10 @@ case "$program" in
   *'create_client_launching=1'*'create_client_pid=$!'*'create_client_launching=0'*'pending_signal_status'*'create_client_identity_published=1'*) ;;
   *) exit 69 ;;
 esac
-case "$program" in
-  *'PGAPPNAME="$create_application_name"'*'pg_stat_activity'*'pg_terminate_backend'*'stop_create_backends'*) ;;
-  *) exit 69 ;;
-esac
+case "$program" in *'PGAPPNAME="$create_application_name"'*) ;; *) exit 69 ;; esac
+case "$program" in *'pg_stat_activity'*) ;; *) exit 69 ;; esac
+case "$program" in *'pg_terminate_backend'*) ;; *) exit 69 ;; esac
+case "$program" in *'stop_create_backends'*) ;; *) exit 69 ;; esac
 
 printf '%s\n' "$action" >>"$FAKE_DOCKER_CALLS"
 current="$(cat "$FAKE_DATABASE_STATE")"
