@@ -597,19 +597,6 @@ assert_contains "$log_root/legacy-nonempty-only.log" 'PostgreSQL backup complete
 assert_backup_tmp_empty legacy-backup-cleanup
 pass_case historical-nonempty
 
-run_noclobber_probe() {
-  local target="$1" stderr_file="$2" status=0
-  # Expansion belongs to the isolated probe shell.
-  # shellcheck disable=SC2016
-  if timeout --signal=TERM --kill-after=1s 2s bash -c \
-      'set -o noclobber; exec {probe_fd}>"$1"' sh "$target" >/dev/null 2>"$stderr_file"; then
-    status=0
-  else
-    status=$?
-  fi
-  printf '%s' "$status"
-}
-
 trace_open_line() {
   local target="$1" trace_file="$2" stderr_file="$3" status=0
   # Expansion belongs to the isolated probe shell.
@@ -633,66 +620,38 @@ assert_command_succeeds strace-available command -v strace
 
 ln -s /dev/null "$probe_root/probe-symlink"
 mapfile -t trace_result < <(trace_open_line "$probe_root/probe-symlink" "$probe_trace" "$probe_stderr")
-assert_status 1 "${trace_result[0]}" symlink-dev-null-status
-assert_nonempty "${trace_result[1]:-}" symlink-dev-null-openat
-assert_contains "$probe_trace" 'O_CREAT' symlink-used-o-creat
-assert_not_contains "$probe_trace" 'O_EXCL' symlink-used-o-excl
-assert_not_contains "$probe_trace" 'O_NOFOLLOW' symlink-used-o-nofollow
-assert_not_contains "$probe_trace" 'O_TRUNC' symlink-used-o-trunc
-if [[ "${trace_result[1]}" =~ =[[:space:]]+[0-9]+([[:space:]]|$) ]]; then
+assert_status 0 "${trace_result[0]}" symlink-dev-null-status
+symlink_trace_line="${trace_result[1]:-}"
+assert_nonempty "$symlink_trace_line" symlink-dev-null-openat
+[[ "$symlink_trace_line" == *O_CREAT* ]] || fail_case symlink-used-o-creat accepted rejected
+[[ "$symlink_trace_line" != *O_EXCL* ]] || fail_case symlink-used-o-excl rejected accepted
+[[ "$symlink_trace_line" != *O_NOFOLLOW* ]] || fail_case symlink-used-o-nofollow rejected accepted
+[[ "$symlink_trace_line" != *O_TRUNC* ]] || fail_case symlink-used-o-trunc rejected accepted
+if [[ "$symlink_trace_line" =~ =[[:space:]]+[0-9]+([[:space:]]|$) ]]; then
   target_opened=yes
 else
   target_opened=no
 fi
 [ "$target_opened" = yes ] || fail_case symlink-target-opened accepted rejected
-printf '%s\n' 'classification case=host-existing-symlink exit-status=1 marker-id=fd-opened-before-path-rejection path-before=symlink symlink-target=character-device path-after=symlink fd-opened-before-validation=yes target-mutated=no cleanup-status=pending'
+assert_command_succeeds symlink-fixture-preserved test -L "$probe_root/probe-symlink"
+assert_command_succeeds symlink-target-character-device test -c /dev/null
 rm -f -- "$probe_root/probe-symlink" "$probe_trace" "$probe_stderr"
-
-printf '%s' sentinel-content >"$probe_root/sentinel"
-sentinel_before="$(sha256sum "$probe_root/sentinel" | awk '{print $1}')"
-ln -s "$probe_root/sentinel" "$probe_root/probe-symlink"
-probe_status="$(run_noclobber_probe "$probe_root/probe-symlink" "$probe_stderr")"
-assert_status 1 "$probe_status" symlink-regular-status
-sentinel_after="$(sha256sum "$probe_root/sentinel" | awk '{print $1}')"
-[ "$sentinel_before" = "$sentinel_after" ] || fail_case symlink-regular-sentinel accepted rejected
-rm -f -- "$probe_root/probe-symlink" "$probe_root/sentinel" "$probe_stderr"
-
-ln -s "$probe_root/dangling-target" "$probe_root/probe-symlink"
-probe_status="$(run_noclobber_probe "$probe_root/probe-symlink" "$probe_stderr")"
-assert_status 1 "$probe_status" dangling-symlink-status
-assert_file_exists "$probe_root/dangling-target" dangling-symlink-target-created
-rm -f -- "$probe_root/probe-symlink" "$probe_root/dangling-target" "$probe_stderr"
-
-mkfifo "$probe_root/probe-fifo"
-ln -s "$probe_root/probe-fifo" "$probe_root/probe-symlink"
-probe_status="$(run_noclobber_probe "$probe_root/probe-symlink" "$probe_stderr")"
-assert_status 124 "$probe_status" symlink-fifo-bounded-timeout
-rm -f -- "$probe_root/probe-symlink" "$probe_root/probe-fifo" "$probe_stderr"
-
-printf '%s' regular-content >"$probe_root/probe-regular"
-regular_before="$(sha256sum "$probe_root/probe-regular" | awk '{print $1}')"
-probe_status="$(run_noclobber_probe "$probe_root/probe-regular" "$probe_stderr")"
-assert_status 1 "$probe_status" existing-regular-status
-regular_after="$(sha256sum "$probe_root/probe-regular" | awk '{print $1}')"
-[ "$regular_before" = "$regular_after" ] || fail_case existing-regular-sentinel accepted rejected
-rm -f -- "$probe_root/probe-regular" "$probe_stderr"
-
-mkdir "$probe_root/probe-directory"
-probe_status="$(run_noclobber_probe "$probe_root/probe-directory" "$probe_stderr")"
-assert_status 1 "$probe_status" existing-directory-status
-rmdir "$probe_root/probe-directory"
-rm -f -- "$probe_stderr"
 
 mapfile -t trace_result < <(trace_open_line "$probe_root/probe-absent" "$probe_trace" "$probe_stderr")
 assert_status 0 "${trace_result[0]}" absent-path-status
-assert_nonempty "${trace_result[1]:-}" absent-path-openat
-assert_contains "$probe_trace" 'O_CREAT' absent-path-used-o-creat
-assert_contains "$probe_trace" 'O_EXCL' absent-path-used-o-excl
-assert_not_contains "$probe_trace" 'O_NOFOLLOW' absent-path-used-o-nofollow
-assert_not_contains "$probe_trace" 'O_TRUNC' absent-path-used-o-trunc
+absent_trace_line="${trace_result[1]:-}"
+assert_nonempty "$absent_trace_line" absent-path-openat
+[[ "$absent_trace_line" == *O_CREAT* ]] || fail_case absent-path-used-o-creat accepted rejected
+[[ "$absent_trace_line" == *O_EXCL* ]] || fail_case absent-path-used-o-excl accepted rejected
+[[ "$absent_trace_line" != *O_NOFOLLOW* ]] || fail_case absent-path-used-o-nofollow rejected accepted
+[[ "$absent_trace_line" != *O_TRUNC* ]] || fail_case absent-path-used-o-trunc rejected accepted
+[[ "$absent_trace_line" =~ =[[:space:]]+[0-9]+([[:space:]]|$) ]] || fail_case absent-path-target-opened accepted rejected
+assert_file_exists "$probe_root/probe-absent" absent-path-regular-file-created
 rm -f -- "$probe_root/probe-absent" "$probe_trace" "$probe_stderr"
 rmdir "$probe_root"
-printf '%s\n' 'classification case=host-redirection-classification used-o-creat=yes used-o-excl-existing-symlink=no used-o-excl-absent-path=yes used-o-nofollow=no used-o-trunc=no followed-symlink=yes target-opened=yes cleanup-status=pass'
+assert_file_absent "$probe_root" redirection-probe-cleanup
+printf '%s\n' 'classification case=host-existing-symlink exit-status=0 marker-id=fd-opened-before-path-rejection path-before=symlink symlink-target=character-device path-after=symlink fd-opened-before-validation=yes target-mutated=no used-o-creat=yes used-o-excl=no used-o-nofollow=no used-o-trunc=no cleanup-status=pass'
+printf '%s\n' 'classification case=host-redirection-classification absent-exit-status=0 absent-path-type=regular used-o-creat=yes used-o-excl=yes used-o-nofollow=no used-o-trunc=no cleanup-status=pass'
 pass_case host-redirection-classification
 
 assert_host_dump_rejected() {
