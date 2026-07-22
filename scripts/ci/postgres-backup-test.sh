@@ -376,7 +376,7 @@ rm -f "$log_root/dump-mode"
 umask 0022
 "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
   "$root/scripts/backup/postgres-backup.sh" >"$log_root/explicit-dump-mode.log" 2>&1
-[ "$(cat "$log_root/dump-mode")" = '0:0:600' ]
+[ "$("${runner[@]}" cat "$log_root/dump-mode")" = '0:0:600' ]
 backup_tmp_is_empty
 assert_host_dump_rejected symlink
 assert_host_dump_rejected fifo
@@ -421,7 +421,7 @@ backup_tmp_is_empty
 rm -f "$log_root/collision-proof"
 "${runner[@]}" env "${root_env[@]}" FAKE_COLLISION_ONCE=1 FAKE_REPOSITORY_BYTES="$below_warning" \
   "$root/scripts/backup/postgres-backup.sh" >"$log_root/collision.log" 2>&1
-grep -Fxq 'existing-operation-preserved' "$log_root/collision-proof"
+"${runner[@]}" grep -Fxq 'existing-operation-preserved' "$log_root/collision-proof"
 grep -Fq 'PostgreSQL backup completed.' "$log_root/collision.log"
 backup_tmp_is_empty
 
