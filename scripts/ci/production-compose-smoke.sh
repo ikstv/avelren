@@ -180,7 +180,8 @@ postgres_query() {
 }
 
 wait_for_query_value() {
-  local query="$1" expected="$2" label="$3" value= deadline=$((SECONDS + 30))
+  local query="$1" expected="$2" label="$3" value='' deadline
+  deadline=$((SECONDS + 30))
   while [ "$SECONDS" -lt "$deadline" ]; do
     value="$(postgres_query "$query" 2>/dev/null || true)"
     [ "$value" = "$expected" ] && return 0
@@ -250,6 +251,8 @@ restore_status_file="$restore_state_dir/.route-status"
 sudo install -d -o root -g root -m 0700 "$restore_state_dir"
 sudo install -o root -g root -m 0600 /dev/null "$restore_status_file"
 printf '%s\n' operation-owned | sudo tee "$restore_status_file" >/dev/null
+# The runner owns both redirection paths; sudo applies only to the helper.
+# shellcheck disable=SC2024
 sudo env \
   "PATH=$PATH" \
   PGHOST=hostile.example.invalid \
@@ -281,7 +284,11 @@ printf '%s\n' 'PASS: production-restore-controlled-route'
 # active until cleanup terminates it; a differently tagged backend must survive.
 intent_wrapper=/usr/local/sbin/createdb
 "${compose[@]}" exec -T -u 0 postgres test ! -e "$intent_wrapper"
-"${compose[@]}" exec -T -u 0 postgres sh -eu -c 'cat >"$1"; chmod 755 "$1"' sh "$intent_wrapper" <<'INTENT_CREATEDB_WRAPPER'
+# Expansion belongs to the isolated shell inside the disposable PostgreSQL container.
+# shellcheck disable=SC2016
+"${compose[@]}" exec -T -u 0 postgres sh -eu -c \
+  'mkdir -p -- "${1%/*}"; chmod 755 "${1%/*}"; cat >"$1"; chmod 755 "$1"' \
+  sh "$intent_wrapper" <<'INTENT_CREATEDB_WRAPPER'
 #!/bin/sh
 set -eu
 exec psql --host 127.0.0.1 --port 5432 --username avelren --no-password \
@@ -323,6 +330,8 @@ wait_for_query_value \
   "SELECT count(*) FROM pg_stat_activity WHERE application_name = '$unrelated_application'" 1 \
   unrelated-restore-backend
 
+# The runner owns both redirection paths; sudo applies only to the helper.
+# shellcheck disable=SC2024
 sudo env \
   "PATH=$PATH" \
   PGHOST=hostile.example.invalid \

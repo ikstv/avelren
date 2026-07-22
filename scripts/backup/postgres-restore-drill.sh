@@ -187,8 +187,16 @@ terminate() {
 create_restore_directory() (
   set -Eeuo pipefail
   created=0
+  ownership_published=0
+  pending_signal_status=0
+  setup_wait_interrupted=0
+  # Invoked indirectly by the EXIT trap below.
+  # shellcheck disable=SC2317
   setup_cleanup() {
     setup_status=$?
+    if [ "$pending_signal_status" -ne 0 ]; then
+      setup_status="$pending_signal_status"
+    fi
     trap - EXIT
     trap '' HUP INT TERM
     if [ "$setup_status" -ne 0 ] && [ "$created" -eq 1 ] && \
@@ -202,13 +210,56 @@ create_restore_directory() (
     fi
     exit "$setup_status"
   }
+
+  # Invoked indirectly by the signal traps below.
+  # shellcheck disable=SC2317
+  handle_setup_signal() {
+    local signal_status="$1"
+    if [ "$pending_signal_status" -eq 0 ]; then
+      pending_signal_status="$signal_status"
+    fi
+    setup_wait_interrupted=1
+    # A trapped signal can interrupt wait before the creation child is reaped.
+    # Queue the first signal until the owner marker is complete so EXIT cleanup
+    # can identify only our path.
+    if [ "$ownership_published" -eq 1 ]; then
+      trap '' HUP INT TERM
+      exit "$pending_signal_status"
+    fi
+  }
+
   trap setup_cleanup EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  trap 'handle_setup_signal 129' HUP
+  trap 'handle_setup_signal 130' INT
+  trap 'handle_setup_signal 143' TERM
   umask 077
   [ ! -e "$restore_dir" ] && [ ! -L "$restore_dir" ]
-  mkdir -m 700 -- "$restore_dir"
+  # Keep the atomic mkdir child alive if a signal is sent to the whole process
+  # group. The parent still records that signal and reaps the direct child, so
+  # a successful return remains an unambiguous ownership handoff.
+  ( trap '' HUP INT TERM; exec mkdir -- "$restore_dir" ) &
+  mkdir_pid=$!
+  mkdir_status=0
+  while :; do
+    setup_wait_interrupted=0
+    if wait "$mkdir_pid"; then
+      mkdir_status=0
+      break
+    else
+      mkdir_status=$?
+    fi
+    if [ "$setup_wait_interrupted" -eq 1 ]; then
+      continue
+    fi
+    break
+  done
+  if [ "$mkdir_status" -ne 0 ]; then
+    if [ "$pending_signal_status" -ne 0 ]; then
+      trap '' HUP INT TERM
+      exit "$pending_signal_status"
+    fi
+    exit "$mkdir_status"
+  fi
   created=1
   printf '%s\n' "$directory_token" >"$restore_dir/.restore-owner"
   chmod 600 "$restore_dir/.restore-owner"
@@ -219,6 +270,11 @@ create_restore_directory() (
   [ "$(cat "$restore_dir/.restore-owner")" = "$directory_token" ]
   [ -d "$payload_dir" ] && [ ! -L "$payload_dir" ]
   [ "$(stat -c '%u:%g:%a' "$payload_dir")" = 0:0:700 ]
+  ownership_published=1
+  if [ "$pending_signal_status" -ne 0 ]; then
+    trap '' HUP INT TERM
+    exit "$pending_signal_status"
+  fi
 )
 
 trap cleanup EXIT
@@ -263,22 +319,26 @@ effective_tmpfs_is_secure || {
 
 restore_token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 directory_token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-case "$restore_token:$directory_token" in ''|*[!a-f0-9:]*) exit 1 ;; esac
+case "$restore_token" in ''|*[!a-f0-9]*) exit 1 ;; esac
+case "$directory_token" in ''|*[!a-f0-9]*) exit 1 ;; esac
 [ "${#restore_token}" -eq 32 ] && [ "${#directory_token}" -eq 32 ] || exit 1
 tmpdb="avelren_restore_$restore_token"
 restore_dir="$tmp_root/avelren-restore.$restore_token"
 payload_dir="$restore_dir/payload"
 cleanup_armed=1
 
-[ -d "$log_root" ] && [ ! -L "$log_root" ] || { printf '%s\n' 'Restore log directory is unsafe.' >&2; exit 1; }
+if [ ! -d "$log_root" ] || [ -L "$log_root" ]; then
+  printf '%s\n' 'Restore log directory is unsafe.' >&2
+  exit 1
+fi
 log_root_metadata="$(stat -c '%u:%a' "$log_root")"
 log_root_uid="${log_root_metadata%%:*}"
 log_root_mode="${log_root_metadata#*:}"
 case "$log_root_uid:$log_root_mode" in *[!0-9:]*) exit 1 ;; esac
-[ "$log_root_uid" -eq 0 ] && [ $((8#$log_root_mode & 0022)) -eq 0 ] || {
+if [ "$log_root_uid" -ne 0 ] || [ $((8#$log_root_mode & 0022)) -ne 0 ]; then
   printf '%s\n' 'Restore log directory is unsafe.' >&2
   exit 1
-}
+fi
 umask 077
 log_file="$(mktemp -p "$log_root" avelren-restore-drill.XXXXXX.log)"
 [ -f "$log_file" ] && [ ! -L "$log_file" ] && [ "$(stat -c '%h:%u:%g:%a' "$log_file")" = 1:0:0:600 ] || exit 1
@@ -305,10 +365,11 @@ if [ "$restore_status" -ne 0 ]; then
   printf '%s\n' 'PostgreSQL-scoped snapshot restore failed.' >&2
   exit "$restore_status"
 fi
-[ -d "$payload_dir" ] && [ ! -L "$payload_dir" ] && [ "$(stat -c '%u:%g:%a' "$payload_dir")" = 0:0:700 ] || {
+if [ ! -d "$payload_dir" ] || [ -L "$payload_dir" ] || \
+   [ "$(stat -c '%u:%g:%a' "$payload_dir")" != 0:0:700 ]; then
   printf '%s\n' 'Restored payload directory is unsafe.' >&2
   exit 1
-}
+fi
 
 candidate_list="$restore_dir/dump-candidates"
 ( umask 077; : >"$candidate_list" )

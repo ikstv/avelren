@@ -29,7 +29,9 @@ assert_status() {
 assert_nonzero_not_timeout() {
   local actual="$1" assertion="$2"
   [ "$actual" -ne 0 ] || fail "$assertion (unexpected success)"
-  [ "$actual" -ne 124 ] && [ "$actual" -ne 137 ] || fail "$assertion (bounded timeout expired)"
+  if [ "$actual" -eq 124 ] || [ "$actual" -eq 137 ]; then
+    fail "$assertion (bounded timeout expired)"
+  fi
 }
 
 assert_contains() {
@@ -124,6 +126,8 @@ restic_proof="$state_root/restic-proof"
 restore_target="$state_root/restore-target"
 host_pg_restore_marker="$state_root/host-pg-restore"
 restic_ready="$state_root/restic-ready"
+setup_directory_ready="$state_root/setup-directory-ready"
+setup_directory_release="$state_root/setup-directory-release"
 create_action_ready="$state_root/create-action-ready"
 create_action_release="$state_root/create-action-release"
 outer_pid_file="$state_root/outer-pid"
@@ -131,7 +135,7 @@ route_status_capture="$state_root/route-status-final"
 sentinel="$fixture_root/sentinel"
 for capture in "$docker_calls" "$route_identity" "$database_state" "$restored_state" \
   "$restic_proof" "$restore_target" "$host_pg_restore_marker" "$restic_ready" "$create_action_ready" "$outer_pid_file" \
-  "$route_status_capture"; do
+  "$setup_directory_ready" "$route_status_capture"; do
   : >"$capture"
   chmod 600 "$capture"
 done
@@ -170,6 +174,25 @@ case "$target" in
 esac
 exec /usr/bin/rm "$@"
 FAKE_RM
+
+cat >"$fake_bin/mkdir" <<'FAKE_MKDIR'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+target="${!#}"
+if [ "${FAKE_MKDIR_SETUP_BARRIER:-0}" = 1 ] && \
+   [ "${target%/*}" = "$FAKE_EXPECTED_TMP_ROOT" ]; then
+  case "${target##*/}" in
+    avelren-restore.*) ;;
+    *) exec /usr/bin/mkdir "$@" ;;
+  esac
+  /usr/bin/mkdir "$@"
+  printf '%s\n' ready >"$FAKE_SETUP_DIRECTORY_READY"
+  IFS= read -r release <"$FAKE_SETUP_DIRECTORY_RELEASE"
+  [ "$release" = release ] || exit 76
+  exit 0
+fi
+exec /usr/bin/mkdir "$@"
+FAKE_MKDIR
 
 cat >"$fake_bin/restic" <<'FAKE_RESTIC'
 #!/usr/bin/env bash
@@ -426,6 +449,8 @@ common_env=(
   "FAKE_RESTORE_TARGET=$restore_target"
   "FAKE_RESTORE_SENTINEL=$sentinel"
   "FAKE_RESTIC_READY=$restic_ready"
+  "FAKE_SETUP_DIRECTORY_READY=$setup_directory_ready"
+  "FAKE_SETUP_DIRECTORY_RELEASE=$setup_directory_release"
   "FAKE_DOCKER_CREATE_READY=$create_action_ready"
   "FAKE_DOCKER_CREATE_RELEASE=$create_action_release"
   "FAKE_HOST_PG_RESTORE_MARKER=$host_pg_restore_marker"
@@ -452,10 +477,10 @@ reset_case() {
   local path output
   for path in "$docker_calls" "$route_identity" "$database_state" "$restored_state" \
     "$restic_proof" "$restore_target" "$host_pg_restore_marker" "$restic_ready" "$create_action_ready" "$outer_pid_file" \
-    "$route_status_capture"; do
+    "$setup_directory_ready" "$route_status_capture"; do
     : >"$path"
   done
-  rm -f -- "$create_action_release"
+  rm -f -- "$create_action_release" "$setup_directory_release"
   printf '%s\n' 'sentinel-unchanged' >"$sentinel"
   output="$("${root_runner[@]}" find "$production_tmp" -mindepth 1 -print -quit)"
   [ -z "$output" ] || fail 'previous restore case left temporary state'
@@ -692,6 +717,49 @@ wait_for_process_exit() {
     sleep 0.05
   done
 }
+
+run_setup_directory_signal_case() {
+  local signal="$1" expected_status="$2" label="restore-directory-handoff-${1,,}"
+  local log="$log_root/$label.log" launch_pid outer_pid restore_root status=0
+  reset_case
+  mkfifo -- "$setup_directory_release"
+  "${root_runner[@]}" env "${common_env[@]}" "${hostile_pg_env[@]}" \
+    FAKE_RESTORE_LAYOUT=one FAKE_MKDIR_SETUP_BARRIER=1 \
+    AVELREN_TEST_OUTER_PID_FILE="$outer_pid_file" \
+    setsid --wait "$test_root/signal-launch.py" "$drill" >"$log" 2>&1 &
+  launch_pid=$!
+  active_launch_pid="$launch_pid"
+  wait_for_marker "$setup_directory_ready" "$launch_pid" || \
+    fail "$label (directory-creation barrier was not reached)"
+  outer_pid="$(cat "$outer_pid_file")"
+  case "$outer_pid" in ''|*[!0-9]*) fail "$label (invalid outer pid)" ;; esac
+  active_outer_pid="$outer_pid"
+  restore_root="$("${root_runner[@]}" find "$production_tmp" -mindepth 1 -maxdepth 1 \
+    -type d -name 'avelren-restore.*' -print -quit)"
+  case "$restore_root" in "$production_tmp"/avelren-restore.*) ;; *) fail "$label (created directory absent)" ;; esac
+  "${root_runner[@]}" test ! -e "$restore_root/.restore-owner" || \
+    fail "$label (ownership was published before the barrier)"
+  "${root_runner[@]}" kill -s "$signal" -- "-$outer_pid"
+  # The wrapper inherits the production creation child's ignored dispositions;
+  # without that isolation this group signal kills it after directory creation.
+  # shellcheck disable=SC2016
+  timeout 3 bash -c 'printf "%s\n" release >"$1"' sh "$setup_directory_release" || \
+    fail "$label (directory-creation barrier release failed)"
+  wait_for_process_exit "$launch_pid" || fail "$label (process did not exit)"
+  if wait "$launch_pid"; then status=0; else status=$?; fi
+  active_launch_pid=
+  active_outer_pid=
+  assert_status "$expected_status" "$status" "$label-status"
+  [ ! -s "$docker_calls" ] || fail "$label (database action started after setup signal)"
+  assert_host_restore_absent "$label-host-route"
+  assert_runtime_empty "$label-cleanup"
+  assert_no_secret "$log" "$label-redaction"
+  rm -f -- "$setup_directory_release"
+  pass "$label"
+}
+
+run_setup_directory_signal_case INT 130
+run_setup_directory_signal_case TERM 143
 
 cat >"$test_root/create-client-handoff.sh" <<'CREATE_CLIENT_HANDOFF'
 #!/bin/sh

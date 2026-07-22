@@ -34,10 +34,10 @@ case "$docker_command_timeout" in ''|*[!0-9]*) exit 1 ;; esac
 [ "$docker_command_timeout" -ge 1 ] && [ "$docker_command_timeout" -le 30 ] || exit 1
 
 status_parent="${status_file%/*}"
-[ "$status_parent" != "$status_file" ] && [ "$status_file" = "$status_parent/.route-status" ] || {
+if [ "$status_parent" = "$status_file" ] || [ "$status_file" != "$status_parent/.route-status" ]; then
   printf '%s\n' 'Restore route status path is invalid.' >&2
   exit 1
-}
+fi
 [ "${status_parent##*/}" = "avelren-restore.$restore_token" ] || {
   printf '%s\n' 'Restore route status path is invalid.' >&2
   exit 1
@@ -53,10 +53,11 @@ fi
 exec {status_fd}>>"$status_file"
 status_file_identity="$(stat -c '%d:%i:%h:%u:%g:%a' "$status_file")"
 status_fd_identity="$(stat -Lc '%d:%i:%h:%u:%g:%a' "/proc/$$/fd/$status_fd")"
-[ "$status_file_identity" = "$status_fd_identity" ] && [[ "$status_file_identity" =~ ^[0-9]+:[0-9]+:1:0:0:600$ ]] || {
+if [ "$status_file_identity" != "$status_fd_identity" ] || \
+   ! [[ "$status_file_identity" =~ ^[0-9]+:[0-9]+:1:0:0:600$ ]]; then
   printf '%s\n' 'Restore route status file identity is unsafe.' >&2
   exit 1
-}
+fi
 
 host_status_file_is_secure() {
   [ -f "$status_file" ] && [ ! -L "$status_file" ] && \
@@ -79,8 +80,8 @@ load_create_handoff() {
   payload="${handoff#database-owned:}"
   cluster="${payload%%:*}"
   oid="${payload#*:}"
-  case "$cluster:$oid" in ''|*[!0-9:]*) return 1 ;; esac
-  [ -n "$cluster" ] && [ -n "$oid" ] || return 1
+  case "$cluster" in ''|*[!0-9]*) return 1 ;; esac
+  case "$oid" in ''|*[!0-9]*) return 1 ;; esac
   expected_cluster="$cluster"
   expected_oid="$oid"
 }

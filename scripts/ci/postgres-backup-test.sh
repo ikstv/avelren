@@ -121,6 +121,8 @@ done
 assert_command_succeeds postgres-tcp-restore-executable test -x "$root/scripts/backup/postgres-tcp-restore.sh"
 assert_contains "$root/scripts/backup/restic-repository.sh" 'RESTIC_POSTGRES_TAG=postgres' postgres-restic-tag-defined
 for tagged_script in postgres-backup.sh postgres-backup-prune.sh postgres-restore-drill.sh; do
+  # This is a literal source-code assertion.
+  # shellcheck disable=SC2016
   assert_contains "$root/scripts/backup/$tagged_script" '--tag "$RESTIC_POSTGRES_TAG"' \
     "${tagged_script%.sh}-postgres-restic-tag-consumed"
 done
