@@ -33,8 +33,6 @@ cleanup() {
   exit "$exit_code"
 }
 trap cleanup EXIT
-# shellcheck disable=SC2154 # ERR trap evaluates this shell snippet at runtime.
-trap 'status=$?; printf "Compose cancellation test failed at line %s.\n" "$LINENO" >&2; exit "$status"' ERR
 
 cat >"$test_root/bin/rclone" <<'EOF'
 #!/bin/sh
@@ -237,7 +235,7 @@ install -d -m 700 "$legacy_dir"
 legacy_ref=
 while read -r candidate; do
   if git -c "safe.directory=$repository_root" -C "$repository_root" show "$candidate:scripts/backup/postgres-backup.sh" 2>/dev/null \
-      | grep -F '"${compose[@]}" exec -T -u 0 postgres sh -s --' >/dev/null && \
+      | grep -F 'exec -T' >/dev/null && \
      git -c "safe.directory=$repository_root" -C "$repository_root" show "$candidate:scripts/backup/postgres-tcp-dump.sh" 2>/dev/null \
       | grep -F 'PGPASSFILE=' >/dev/null; then
     legacy_ref="$candidate"

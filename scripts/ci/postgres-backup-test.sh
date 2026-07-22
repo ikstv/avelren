@@ -68,8 +68,6 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-# shellcheck disable=SC2154 # ERR trap evaluates this shell snippet at runtime.
-trap 'status=$?; printf "Backup safety test failed at line %s.\n" "$LINENO" >&2; exit "$status"' ERR
 
 cat >"$fake_bin/docker" <<'FAKE_DOCKER'
 #!/usr/bin/env bash
@@ -282,11 +280,13 @@ assert_tmpfs_rejected() {
   local case_name="$1" expected_message="$2"
   shift 2
   "${runner[@]}" rm -f "$test_root/docker-state"
-  set +e
-  "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$@" \
-    "$root/scripts/backup/postgres-backup.sh" >"$log_root/tmpfs-$case_name.log" 2>&1
-  local status=$?
-  set -e
+  local status=0
+  if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" "$@" \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/tmpfs-$case_name.log" 2>&1; then
+    :
+  else
+    status=$?
+  fi
   [ "$status" -ne 0 ]
   grep -Fq "$expected_message" "$log_root/tmpfs-$case_name.log"
   [ ! -e "$test_root/docker-state" ]
