@@ -614,6 +614,20 @@ assert_runner_file_absent() {
   fi
   assert_status 0 "$status" "$assertion"
 }
+assert_runner_contains_exact_line() {
+  local file="$1" marker="$2" assertion="$3" status=0 actual=absent
+  diagnostics_current_assertion="$assertion"
+  if "${runner[@]}" grep -Fxq -- "$marker" "$file" 2>/dev/null; then
+    return 0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 1 ] || actual=unavailable
+  [ "$status" -eq 1 ] || status=2
+  diagnostics_record_failure "$status" "${BASH_LINENO[0]}" "$assertion" marker present "$actual"
+  trap - ERR
+  exit "$status"
+}
 remove_runner_or_root_fixture() {
   local path="$1" assertion="$2" status=0
   diagnostics_set_assertion "$assertion"
@@ -1494,7 +1508,7 @@ run_setup_signal_case() {
     cleaned)
       assert_runner_file_absent "$operation_path" "$label-operation-cleaned"
       if [ "$phase" = after-creation ]; then
-        assert_contains_exact_line "$setup_cleanup_trace" cleaned "$label-token-cleanup"
+        assert_runner_contains_exact_line "$setup_cleanup_trace" cleaned "$label-token-cleanup"
       fi
       ;;
     preserved)
@@ -1554,14 +1568,14 @@ for setup_failure in before after; do
     "setup-failure-$setup_failure-diagnostic"
   assert_operation_root_empty "setup-failure-$setup_failure-cleanup"
   if [ "$setup_failure" = after ]; then
-    assert_contains_exact_line "$setup_cleanup_trace" cleaned setup-failure-after-token-cleanup
+    assert_runner_contains_exact_line "$setup_cleanup_trace" cleaned setup-failure-after-token-cleanup
   fi
 done
 pass_case operation-setup-failure-cleanup
 
 begin_case operation-setup-collision-signal
 run_setup_signal_case setup-collision-term collision TERM 143 preserved FAKE_COLLISION_SIGNAL=1
-assert_contains_exact_line "$setup_cleanup_trace" preserved collision-token-mismatch-preserved
+assert_runner_contains_exact_line "$setup_cleanup_trace" preserved collision-token-mismatch-preserved
 collision_stale_status=0
 if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
     "$root/scripts/backup/postgres-backup.sh" >"$log_root/setup-collision-stale.log" 2>&1; then
