@@ -742,24 +742,24 @@ inspect_marker_evidence() {
 
   if [ "$path_exists" = no ]; then
     if [ "$identity_before" = unavailable ]; then
-      classification=evidence-file-missing
+      classification='evidence-file-missing'
     else
-      classification=evidence-removed-before-assertion
+      classification='evidence-removed-before-assertion'
     fi
   elif [ "$parent_traversal_user" = no ]; then
-    classification=evidence-parent-not-traversable
+    classification='evidence-parent-not-traversable'
   elif [ "$path_type" != regular ]; then
-    classification=grep-error
+    classification='grep-error'
   elif [ "$root_grep_status" -eq 0 ] && [ "$user_grep_status" -eq 2 ] && [ "${file_metadata%%:*}" = 0 ]; then
-    classification=marker-present-root-only
+    classification='marker-present-root-only'
   elif [ "$user_grep_status" -eq 2 ] && [ "${file_metadata%%:*}" = 0 ]; then
-    classification=evidence-root-owned
+    classification='evidence-root-owned'
   elif [ "$user_grep_status" -eq 2 ]; then
-    classification=evidence-file-not-readable
+    classification='evidence-file-not-readable'
   elif [ "$root_grep_status" -eq 1 ]; then
-    classification=marker-absent
+    classification='marker-absent'
   elif [ "$root_grep_status" -gt 1 ]; then
-    classification=grep-error
+    classification='grep-error'
   fi
 
   marker_evidence_classification="$classification"
