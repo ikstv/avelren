@@ -68,6 +68,7 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+trap 'status=$?; printf "Backup safety test failed at line %s.\n" "$LINENO" >&2; exit "$status"' ERR
 
 cat >"$fake_bin/docker" <<'FAKE_DOCKER'
 #!/usr/bin/env bash

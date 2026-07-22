@@ -33,6 +33,7 @@ cleanup() {
   exit "$exit_code"
 }
 trap cleanup EXIT
+trap 'status=$?; printf "Compose cancellation test failed at line %s.\n" "$LINENO" >&2; exit "$status"' ERR
 
 cat >"$test_root/bin/rclone" <<'EOF'
 #!/bin/sh
