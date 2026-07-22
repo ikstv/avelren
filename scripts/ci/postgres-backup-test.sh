@@ -133,14 +133,14 @@ cat >"$fake_bin/restic" <<'FAKE_RESTIC'
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "${RESTIC_REPOSITORY:-missing}" >>"$FAKE_RESTIC_REPOSITORIES"
-case "$*" in
-  *snapshots*) exit 0 ;;
-  *backup*)
+case "${1:-}" in
+  snapshots) exit 0 ;;
+  backup)
     dump="${!#}"
     stat -c '%u:%g:%a' "$dump" >"$FAKE_DUMP_MODE"
     [ "${FAKE_RESTIC_FAIL:-0}" = 1 ] && exit 42 || exit 0
     ;;
-  *restore*) target=''; previous=''; for arg in "$@"; do [ "$previous" = --target ] && target="$arg"; previous="$arg"; done; printf '%s\n' fake-dump >"$target/restored.dump" ;;
+  restore) target=''; previous=''; for arg in "$@"; do [ "$previous" = --target ] && target="$arg"; previous="$arg"; done; printf '%s\n' fake-dump >"$target/restored.dump" ;;
   *) exit 0 ;;
 esac
 FAKE_RESTIC
