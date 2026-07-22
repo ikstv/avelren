@@ -1476,6 +1476,8 @@ run_setup_signal_case() {
   if [ "$phase" = after-creation ] || [ "$phase" = collision ]; then
     assert_command_succeeds "$label-still-blocked-before-release" "${runner[@]}" test -d "$operation_path"
   fi
+  # Positional expansion belongs to the isolated bounded Bash writer.
+  # shellcheck disable=SC2016
   assert_command_succeeds "$label-barrier-release" timeout 3 bash -c 'printf "%s\n" release >"$1"' sh "$release"
   diagnostics_set_assertion "$label-outer-exit"
   wait_for_wrapper_exit "$launch_pid"
