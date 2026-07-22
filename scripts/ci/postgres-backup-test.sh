@@ -58,6 +58,12 @@ else
     'repository-below-warning|repository below warning threshold succeeds'
     'runtime-stale-state|stale runtime state is rejected'
     'operation-collision-retry|operation collision preserves existing state'
+    'operation-setup-before-creation-signals|setup ownership is safe before operation creation'
+    'operation-setup-window-signals|setup-window signals clean the owned operation'
+    'operation-setup-after-return-signal|signal after setup return cleans the active operation'
+    'operation-setup-failure-cleanup|setup failures clean only partial owned state'
+    'operation-setup-collision-signal|setup collision state survives signal cleanup'
+    'operation-setup-cleanup-unavailable|unavailable cleanup preserves signal status and reports risk'
     'repository-warning|repository warning threshold emits warning'
     'repository-hard-stop|repository hard limit stops backup'
     'restic-failure|Restic failure preserves cleanup and status'
@@ -258,6 +264,34 @@ cat >"$fake_bin/docker" <<'FAKE_DOCKER'
 #!/usr/bin/env bash
 set -eu
 args="$*"
+arguments=("$@")
+
+operation_path() {
+  local control="$1" operation_name
+  operation_name="${control##*/}"
+  case "$operation_name" in operation.*) ;; *) exit 64 ;; esac
+  printf '%s/%s\n' "$FAKE_OPERATION_ROOT" "$operation_name"
+}
+
+control_argument() {
+  local action="$1" offset="$2" index
+  for index in "${!arguments[@]}"; do
+    if [ "${arguments[$index]}" = "$action" ]; then
+      printf '%s\n' "${arguments[$((index + offset))]}"
+      return 0
+    fi
+  done
+  return 64
+}
+
+wait_setup_barrier() {
+  local phase="$1"
+  [ "${FAKE_SETUP_BARRIER_PHASE:-}" = "$phase" ] || return 0
+  printf '%s\n' "$phase" >"$FAKE_SETUP_READY"
+  read -r release <"$FAKE_SETUP_RELEASE"
+  [ "$release" = release ]
+}
+
 case "$args" in
   *'ps -q postgres'*) printf '%s\n' fake-postgres ;;
   *State.Health.Status*) printf '%s\n' healthy ;;
@@ -276,16 +310,43 @@ case "$args" in
     ;;
   *'exec --user 0 fake-postgres sh -eu -c'*)
     [ "${FAKE_STALE_RUNTIME:-0}" = 0 ] || exit 74
+    for operation in "$FAKE_OPERATION_ROOT"/operation.*; do [ ! -e "$operation" ] || exit 74; done
     ;;
   *'exec --interactive --user 0 fake-postgres sh -eu -c'*)
     cat >/dev/null
+    argument_count="${#arguments[@]}"
+    setup_token="${arguments[$((argument_count - 1))]}"
+    control_dir="${arguments[$((argument_count - 2))]}"
+    operation="$(operation_path "$control_dir")"
+    printf '%s\n' "${control_dir##*/}" >"${FAKE_SETUP_CONTROL_FILE:-/dev/null}"
+    if [ "${FAKE_SETUP_FAIL:-}" = before ]; then exit 75; fi
+    if [ "${FAKE_COLLISION_SIGNAL:-0}" = 1 ]; then
+      mkdir -m 700 -- "$operation"
+      if [ "${setup_token:0:1}" = 0 ]; then foreign_token="1${setup_token:1}"; else foreign_token="0${setup_token:1}"; fi
+      printf '%s\n' "$foreign_token" >"$operation/.setup-owner"
+      chmod 600 "$operation/.setup-owner"
+      printf '%s\n' 'existing-operation-preserved' >"$FAKE_COLLISION_PROOF"
+      wait_setup_barrier collision
+      exit 73
+    fi
     if [ "${FAKE_COLLISION_ONCE:-0}" = 1 ] && [ ! -e "$FAKE_COLLISION_PROOF" ]; then
       printf '%s\n' 'existing-operation-preserved' >"$FAKE_COLLISION_PROOF"
       exit 73
     fi
+    wait_setup_barrier before-creation
+    [ "${FAKE_SETUP_BARRIER_PHASE:-}" != before-creation ] || exit 75
+    mkdir -m 700 -- "$operation"
+    printf '%s\n' "$setup_token" >"$operation/.setup-owner"
+    chmod 600 "$operation/.setup-owner"
+    printf '%s\n' runner >"$operation/runner.sh"
+    printf '%s\n' heartbeat >"$operation/heartbeat"
+    wait_setup_barrier after-creation
+    [ "${FAKE_SETUP_FAIL:-}" != after ] || exit 76
     printf '%s\n' starting >"$FAKE_DOCKER_STATE"
     ;;
   *'exec --detach --user 0 '*'-env AVELREN_BACKUP_OPERATION_ID='*)
+    printf '%s\n' reached >"${FAKE_DETACHED_REACHED:-/dev/null}"
+    wait_setup_barrier before-detached
     printf '%s\n' done:0 >"$FAKE_DOCKER_STATE"
     ;;
   *'exec --interactive --user 0 fake-postgres sh -s -- heartbeat '*) cat >/dev/null ;;
@@ -295,9 +356,28 @@ case "$args" in
     ;;
   *'exec --interactive --user 0 fake-postgres sh -s -- cleanup '*)
     cat >/dev/null
+    control_dir="$(control_argument cleanup 1)"
+    operation="$(operation_path "$control_dir")"
+    rm -rf -- "$operation"
     printf '%s\n' missing >"$FAKE_DOCKER_STATE"
     ;;
+  *'exec --interactive --user 0 fake-postgres sh -s -- cleanup-owned '*)
+    cat >/dev/null
+    [ "${FAKE_CLEANUP_UNAVAILABLE:-0}" = 0 ] || exit 69
+    control_dir="$(control_argument cleanup-owned 1)"
+    setup_token="$(control_argument cleanup-owned 3)"
+    operation="$(operation_path "$control_dir")"
+    if [ ! -e "$operation" ]; then exit 0; fi
+    if [ -f "$operation/.setup-owner" ] && [ "$(cat "$operation/.setup-owner")" = "$setup_token" ]; then
+      rm -rf -- "$operation"
+      printf '%s\n' cleaned >>"$FAKE_SETUP_CLEANUP_TRACE"
+      exit 0
+    fi
+    printf '%s\n' preserved >>"$FAKE_SETUP_CLEANUP_TRACE"
+    exit 67
+    ;;
   *'exec --interactive --user 0 fake-postgres sh -s -- signal '*) cat >/dev/null ;;
+  *'exec --interactive --user 0 fake-postgres sh -s -- role-state '*) cat >/dev/null; printf '%s\n' stopped ;;
   *createdb*) : >"$FAKE_DB_CREATED" ;;
   *dropdb*) : >"$FAKE_DB_DROPPED" ;;
   *psql*) case "$args" in *string_agg*) printf '%s\n' '001,002,003' ;; *) printf '%s\n' t ;; esac ;;
@@ -402,10 +482,32 @@ restic_repositories="$state_root/restic-repositories"
 restic_calls="$state_root/restic-calls"
 docker_state="$state_root/docker-state"
 dump_mode="$state_root/dump-mode"
+operation_root="$state_root/operations"
+setup_control_file="$state_root/setup-control"
+setup_cleanup_trace="$state_root/setup-cleanup-trace"
+detached_reached="$state_root/detached-reached"
+mkdir -m 700 "$operation_root"
 touch "$rclone_calls" "$restic_repositories" "$restic_calls"
 root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$production_lock/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$state_root/db-created" "FAKE_DB_DROPPED=$state_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories" "FAKE_RESTIC_CALLS=$restic_calls" "FAKE_COLLISION_PROOF=$state_root/collision-proof")
 root_env+=("FAKE_DOCKER_STATE=$docker_state")
 root_env+=("FAKE_DUMP_MODE=$dump_mode")
+root_env+=("FAKE_OPERATION_ROOT=$operation_root" "FAKE_SETUP_CONTROL_FILE=$setup_control_file" "FAKE_SETUP_CLEANUP_TRACE=$setup_cleanup_trace" "FAKE_DETACHED_REACHED=$detached_reached")
+signal_launcher="$test_root/signal-launch.py"
+cat >"$signal_launcher" <<'PY'
+#!/usr/bin/env python3
+import os
+import signal
+import sys
+
+pid_file = os.environ["AVELREN_TEST_OUTER_PID_FILE"]
+descriptor = os.open(pid_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+    stream.write(f"{os.getpid()}\n")
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+os.execv(sys.argv[1], sys.argv[1:])
+PY
+chmod 755 "$signal_launcher"
 pass_case harness-setup
 
 begin_case password-validator
@@ -519,6 +621,48 @@ remove_runner_or_root_fixture() {
 }
 reset_docker_state() {
   remove_runner_or_root_fixture "$docker_state" hostile-docker-state-reset
+}
+remove_test_operation_directory() {
+  local path="$1" assertion="$2" operation_name operation_identifier status=0
+  operation_name="${path##*/}"
+  operation_identifier="${operation_name#operation.}"
+  diagnostics_set_assertion "$assertion"
+  [ "${path%/*}" = "$operation_root" ] || fail_case "$assertion-scope" exact-path outside-root
+  case "$operation_name" in operation.*) ;; *) fail_case "$assertion-name" valid invalid ;; esac
+  case "$operation_identifier" in ''|*[!a-f0-9]*) fail_case "$assertion-identifier" valid invalid ;; esac
+  [ "${#operation_identifier}" -eq 32 ] || fail_case "$assertion-length" 32 "${#operation_identifier}"
+  if "${runner[@]}" rm -rf -- "$path"; then status=0; else status=$?; fi
+  assert_status 0 "$status" "$assertion"
+  assert_runner_file_absent "$path" "$assertion-absent"
+}
+assert_operation_root_empty() {
+  local assertion="$1" output status=0
+  diagnostics_set_assertion "$assertion-find"
+  if output="$("${runner[@]}" find "$operation_root" -mindepth 1 -maxdepth 1 -print -quit)"; then status=0; else status=$?; fi
+  assert_status 0 "$status" "$assertion-find-status"
+  [ -z "$output" ] || fail_case "$assertion" empty entries-present
+}
+wait_for_root_file() {
+  local path="$1" process_id="$2"
+  for _ in $(seq 1 200); do
+    "${runner[@]}" test -e "$path" && return 0
+    kill -0 "$process_id" 2>/dev/null || return 1
+    sleep 0.025
+  done
+  return 1
+}
+wait_for_wrapper_exit() {
+  local process_id="$1" deadline=$((SECONDS + 15))
+  while kill -0 "$process_id" 2>/dev/null; do
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 0.05
+  done
+}
+reset_setup_signal_fixtures() {
+  local suffix="$1"
+  remove_runner_or_root_fixture "$setup_control_file" "$suffix-control-reset"
+  remove_runner_or_root_fixture "$setup_cleanup_trace" "$suffix-cleanup-trace-reset"
+  remove_runner_or_root_fixture "$detached_reached" "$suffix-detached-reset"
 }
 assert_harness_root_ownership() {
   local suffix="$1" test_metadata log_metadata
@@ -1284,6 +1428,153 @@ assert_command_succeeds collision-state-preserved "${runner[@]}" grep -Fxq 'exis
 assert_contains "$log_root/collision.log" 'PostgreSQL backup completed.' collision-backup-completed
 assert_backup_tmp_empty collision-cleanup
 pass_case operation-collision-retry
+
+run_setup_signal_case() {
+  local label="$1" phase="$2" signal="$3" expected_status="$4" expected_cleanup="$5"
+  shift 5
+  local ready="$state_root/setup-ready-$label" release="$state_root/setup-release-$label"
+  local outer_pid_file="$state_root/setup-outer-pid-$label" log_file="$log_root/setup-signal-$label.log"
+  local launch_pid outer_pid status=0 operation_name operation_path
+  reset_setup_signal_fixtures "$label"
+  remove_runner_or_root_fixture "$ready" "$label-ready-reset"
+  remove_runner_or_root_fixture "$release" "$label-release-reset"
+  remove_runner_or_root_fixture "$outer_pid_file" "$label-pid-reset"
+  diagnostics_set_assertion "$label-release-create"
+  mkfifo -- "$release"
+  diagnostics_set_assertion "$label-backup-launch"
+  "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
+    FAKE_SETUP_BARRIER_PHASE="$phase" FAKE_SETUP_READY="$ready" FAKE_SETUP_RELEASE="$release" \
+    AVELREN_BACKUP_DOCKER_TIMEOUT=10 AVELREN_TEST_OUTER_PID_FILE="$outer_pid_file" "$@" \
+    "$signal_launcher" "$root/scripts/backup/postgres-backup.sh" >"$log_file" 2>&1 &
+  launch_pid=$!
+  diagnostics_set_assertion "$label-barrier-ready"
+  wait_for_root_file "$ready" "$launch_pid"
+  diagnostics_set_assertion "$label-outer-pid-ready"
+  wait_for_root_file "$outer_pid_file" "$launch_pid"
+  operation_name="$("${runner[@]}" cat "$setup_control_file")"
+  operation_path="$operation_root/$operation_name"
+  last_signal_operation="$operation_path"
+  case "$phase" in
+    before-creation)
+      assert_runner_file_absent "$operation_path" "$label-not-created-before-signal"
+      assert_runner_file_absent "$detached_reached" "$label-host-not-active"
+      ;;
+    after-creation|collision)
+      assert_command_succeeds "$label-created-before-signal" "${runner[@]}" test -d "$operation_path"
+      assert_runner_file_absent "$detached_reached" "$label-host-not-active"
+      ;;
+    before-detached)
+      assert_command_succeeds "$label-created-before-signal" "${runner[@]}" test -d "$operation_path"
+      assert_command_succeeds "$label-host-active" "${runner[@]}" test -e "$detached_reached"
+      ;;
+    *) fail_case "$label-phase" known unknown ;;
+  esac
+  outer_pid="$("${runner[@]}" cat "$outer_pid_file")"
+  case "$outer_pid" in ''|*[!0-9]*) fail_case "$label-outer-pid" numeric invalid ;; esac
+  diagnostics_set_assertion "$label-signal-delivery"
+  "${runner[@]}" kill -s "$signal" "$outer_pid"
+  if [ "$phase" = after-creation ] || [ "$phase" = collision ]; then
+    assert_command_succeeds "$label-still-blocked-before-release" "${runner[@]}" test -d "$operation_path"
+  fi
+  assert_command_succeeds "$label-barrier-release" timeout 3 bash -c 'printf "%s\n" release >"$1"' sh "$release"
+  diagnostics_set_assertion "$label-outer-exit"
+  wait_for_wrapper_exit "$launch_pid"
+  if wait "$launch_pid"; then status=0; else status=$?; fi
+  assert_status "$expected_status" "$status" "$label-signal-status"
+  case "$expected_cleanup" in
+    absent) assert_runner_file_absent "$operation_path" "$label-operation-absent" ;;
+    cleaned)
+      assert_runner_file_absent "$operation_path" "$label-operation-cleaned"
+      if [ "$phase" = after-creation ]; then
+        assert_contains_exact_line "$setup_cleanup_trace" cleaned "$label-token-cleanup"
+      fi
+      ;;
+    preserved)
+      assert_command_succeeds "$label-operation-preserved" "${runner[@]}" test -d "$operation_path"
+      ;;
+    *) fail_case "$label-cleanup-contract" known unknown ;;
+  esac
+  assert_not_contains "$log_file" fixture-password "$label-secret-absent"
+  remove_runner_or_root_fixture "$release" "$label-release-cleanup"
+  remove_runner_or_root_fixture "$ready" "$label-ready-cleanup"
+  remove_runner_or_root_fixture "$outer_pid_file" "$label-pid-cleanup"
+  printf 'signal-setup case=%s phase=%s signal=%s exit-status=%s cleanup=%s barrier=pass\n' \
+    "$label" "$phase" "$signal" "$status" "$expected_cleanup"
+}
+
+assert_next_backup_succeeds() {
+  local label="$1"
+  reset_docker_state
+  diagnostics_set_assertion "$label-next-backup"
+  "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/$label-next-backup.log" 2>&1
+  assert_operation_root_empty "$label-next-backup-runtime-clean"
+  assert_contains "$log_root/$label-next-backup.log" 'PostgreSQL backup completed.' "$label-next-backup-completed"
+}
+
+begin_case operation-setup-before-creation-signals
+run_setup_signal_case setup-before-int before-creation INT 130 absent
+assert_next_backup_succeeds setup-before-int
+run_setup_signal_case setup-before-term before-creation TERM 143 absent
+assert_next_backup_succeeds setup-before-term
+pass_case operation-setup-before-creation-signals
+
+begin_case operation-setup-window-signals
+run_setup_signal_case setup-window-int after-creation INT 130 cleaned
+assert_next_backup_succeeds setup-window-int
+run_setup_signal_case setup-window-term after-creation TERM 143 cleaned
+assert_next_backup_succeeds setup-window-term
+pass_case operation-setup-window-signals
+
+begin_case operation-setup-after-return-signal
+run_setup_signal_case setup-before-detached-term before-detached TERM 143 cleaned
+assert_next_backup_succeeds setup-before-detached-term
+pass_case operation-setup-after-return-signal
+
+begin_case operation-setup-failure-cleanup
+for setup_failure in before after; do
+  reset_setup_signal_fixtures "setup-failure-$setup_failure"
+  setup_failure_status=0
+  if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_SETUP_FAIL="$setup_failure" \
+      "$root/scripts/backup/postgres-backup.sh" >"$log_root/setup-failure-$setup_failure.log" 2>&1; then
+    setup_failure_status=0
+  else
+    setup_failure_status=$?
+  fi
+  assert_status 1 "$setup_failure_status" "setup-failure-$setup_failure-status"
+  assert_contains "$log_root/setup-failure-$setup_failure.log" 'Could not create isolated PostgreSQL backup operation.' \
+    "setup-failure-$setup_failure-diagnostic"
+  assert_operation_root_empty "setup-failure-$setup_failure-cleanup"
+  if [ "$setup_failure" = after ]; then
+    assert_contains_exact_line "$setup_cleanup_trace" cleaned setup-failure-after-token-cleanup
+  fi
+done
+pass_case operation-setup-failure-cleanup
+
+begin_case operation-setup-collision-signal
+run_setup_signal_case setup-collision-term collision TERM 143 preserved FAKE_COLLISION_SIGNAL=1
+assert_contains_exact_line "$setup_cleanup_trace" preserved collision-token-mismatch-preserved
+collision_stale_status=0
+if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/setup-collision-stale.log" 2>&1; then
+  collision_stale_status=0
+else
+  collision_stale_status=$?
+fi
+assert_status 1 "$collision_stale_status" collision-next-backup-status
+assert_contains "$log_root/setup-collision-stale.log" 'PostgreSQL backup runtime is unsafe or contains operation state.' collision-next-backup-stale-state
+remove_test_operation_directory "$last_signal_operation" collision-operation-cleanup
+pass_case operation-setup-collision-signal
+
+begin_case operation-setup-cleanup-unavailable
+run_setup_signal_case setup-cleanup-unavailable-int after-creation INT 130 preserved FAKE_CLEANUP_UNAVAILABLE=1
+assert_contains "$log_root/setup-signal-setup-cleanup-unavailable-int.log" \
+  'Could not verify cleanup of PostgreSQL backup setup state.' cleanup-unavailable-diagnostic
+cleanup_warning_count="$(grep -Fc 'Could not verify cleanup of PostgreSQL backup setup state.' \
+  "$log_root/setup-signal-setup-cleanup-unavailable-int.log" || :)"
+[ "$cleanup_warning_count" = 1 ] || fail_case cleanup-unavailable-marker-count one "$cleanup_warning_count"
+remove_test_operation_directory "$last_signal_operation" cleanup-unavailable-operation-cleanup
+pass_case operation-setup-cleanup-unavailable
 
 begin_case repository-warning
 diagnostics_set_assertion backup-command-success

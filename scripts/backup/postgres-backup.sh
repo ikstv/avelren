@@ -30,6 +30,9 @@ container=
 control_dir=
 operation_id=
 operation_active=0
+operation_setup_cleanup_armed=0
+operation_setup_token=
+operation_cleanup_warning_emitted=0
 tmpdir=
 
 case "$heartbeat_timeout:$docker_command_timeout:$termination_timeout" in *[!0-9:]*) exit 1 ;; esac
@@ -127,8 +130,23 @@ wait_for_role_stop() {
   return 1
 }
 
+cleanup_setup_operation() {
+  [ "$operation_setup_cleanup_armed" -eq 1 ] || return 0
+  if control cleanup-owned "$control_dir" "$operation_id" "$operation_setup_token" >/dev/null 2>&1; then
+    operation_setup_cleanup_armed=0
+    operation_setup_token=
+  elif [ "$operation_cleanup_warning_emitted" -eq 0 ]; then
+    printf '%s\n' 'Could not verify cleanup of PostgreSQL backup setup state.' >&2
+    operation_cleanup_warning_emitted=1
+  fi
+  return 0
+}
+
 cancel_operation() {
-  [ "$operation_active" -eq 1 ] || return 0
+  if [ "$operation_active" -ne 1 ]; then
+    cleanup_setup_operation
+    return 0
+  fi
   children_stopped=1
   control signal "$control_dir" "$operation_id" supervisor TERM >/dev/null 2>&1 || true
   if ! wait_for_operation_stop; then
@@ -270,31 +288,49 @@ for _ in 1 2 3 4 5; do
   operation_id="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   case "$operation_id" in ''|*[!a-f0-9]*) exit 1 ;; esac
   [ "${#operation_id}" -eq 32 ] || exit 1
+  operation_setup_token="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  case "$operation_setup_token" in ''|*[!a-f0-9]*) exit 1 ;; esac
+  [ "${#operation_setup_token}" -eq 32 ] || exit 1
   control_dir="$container_runtime_root/operation.$operation_id"
+  operation_setup_cleanup_armed=1
   create_status=0
   # mkdir is atomic and deliberately does not accept an existing operation.
+  # The independent marker hands cleanup ownership to the host before this
+  # foreground command can defer an INT/TERM trap.
   # Expansion belongs to the isolated container shell.
   # shellcheck disable=SC2016
   docker_timed exec --interactive --user 0 "$container" sh -eu -c '
     umask 077
-    root="$1"; directory="$2"; created=0
+    root="$1"; directory="$2"; setup_token="$3"; created=0
     cleanup() { status=$?; trap - EXIT HUP INT TERM; [ "$status" -eq 0 ] || [ "$created" -eq 0 ] || rm -rf -- "$directory"; exit "$status"; }
     trap cleanup EXIT
     trap "exit 129" HUP
     trap "exit 130" INT
     trap "exit 143" TERM
     [ -d "$root" ] && [ ! -L "$root" ] && [ "$(stat -c "%u:%g:%a" "$root")" = "0:0:700" ]
+    case "$setup_token" in ""|*[!a-f0-9]*) exit 64 ;; esac
+    [ "${#setup_token}" -eq 32 ]
     if ! mkdir -m 700 -- "$directory"; then [ ! -e "$directory" ] || exit 73; exit 1; fi
     created=1
     [ "$(stat -c "%u:%g:%a" "$directory")" = "0:0:700" ]
+    printf "%s\n" "$setup_token" >"$directory/.setup-owner"
+    [ -f "$directory/.setup-owner" ] && [ ! -L "$directory/.setup-owner" ]
+    [ "$(stat -c "%h:%u:%g:%a" "$directory/.setup-owner")" = "1:0:0:600" ]
     cat >"$directory/runner.sh"
     chmod 700 "$directory/runner.sh"
     date +%s >"$directory/heartbeat"
-  ' sh "$container_runtime_root" "$control_dir" <"$postgres_dump_helper" || create_status=$?
-  [ "$create_status" -eq 73 ] || break
+  ' sh "$container_runtime_root" "$control_dir" "$operation_setup_token" <"$postgres_dump_helper" || create_status=$?
+  if [ "$create_status" -eq 73 ]; then
+    operation_setup_cleanup_armed=0
+    operation_setup_token=
+    continue
+  fi
+  break
 done
 [ "$create_status" -eq 0 ] || { printf '%s\n' 'Could not create isolated PostgreSQL backup operation.' >&2; exit 1; }
 operation_active=1
+operation_setup_cleanup_armed=0
+operation_setup_token=
 docker_timed exec --detach --user 0 \
   --env "AVELREN_BACKUP_OPERATION_ID=$operation_id" \
   --env "AVELREN_BACKUP_HEARTBEAT_TIMEOUT=$heartbeat_timeout" \

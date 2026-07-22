@@ -50,6 +50,32 @@ identity_exists() {
   [ -r "/proc/$pid/stat" ] && [ "$(awk '{print $22}' "/proc/$pid/stat")" = "$start_time" ]
 }
 
+cleanup_owned_setup() {
+  setup_token="$1"
+  case "$setup_token" in ''|*[!a-f0-9]*) exit 64 ;; esac
+  [ "${#setup_token}" -eq 32 ] || exit 64
+  if [ ! -e "$control_dir" ] && [ ! -L "$control_dir" ]; then return 0; fi
+  [ -d "$control_dir" ] && [ ! -L "$control_dir" ] || exit 67
+  [ "$(stat -c '%u:%g:%a' "$control_dir")" = '0:0:700' ] || exit 67
+  setup_owner="$control_dir/.setup-owner"
+  [ -f "$setup_owner" ] && [ ! -L "$setup_owner" ] || exit 67
+  [ "$(stat -c '%h:%u:%g:%a' "$setup_owner")" = '1:0:0:600' ] || exit 67
+  [ "$(cat "$setup_owner")" = "$setup_token" ] || exit 67
+  for setup_role in supervisor dump watchdog; do
+    if identity_exists "$setup_role"; then exit 66; fi
+  done
+  # Revalidate the exact ownership marker immediately before the scoped remove.
+  [ -d "$control_dir" ] && [ ! -L "$control_dir" ] || exit 67
+  [ "$(stat -c '%u:%g:%a' "$control_dir")" = '0:0:700' ] || exit 67
+  [ -f "$setup_owner" ] && [ ! -L "$setup_owner" ] || exit 67
+  [ "$(stat -c '%h:%u:%g:%a' "$setup_owner")" = '1:0:0:600' ] || exit 67
+  [ "$(cat "$setup_owner")" = "$setup_token" ] || exit 67
+  for setup_role in supervisor dump watchdog; do
+    if identity_exists "$setup_role"; then exit 66; fi
+  done
+  rm -rf -- "$control_dir"
+}
+
 signal_role() {
   role="$1"
   signal="$2"
@@ -110,6 +136,9 @@ case "$action" in
       if identity_exists "$role"; then exit 66; fi
     done
     [ ! -e "$control_dir" ] || rm -rf -- "$control_dir"
+    ;;
+  cleanup-owned)
+    cleanup_owned_setup "$role"
     ;;
   *) exit 64 ;;
 esac

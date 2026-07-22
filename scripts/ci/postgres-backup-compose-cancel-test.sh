@@ -111,6 +111,67 @@ unrelated_is_live() {
   [ "$current" = "$start" ]
 }
 
+# Validate the setup ownership handoff against the real control helper inside
+# the disposable container before exercising process cancellation.
+owned_setup_id=00000000000000000000000000000011
+owned_setup_token=11111111111111111111111111111111
+owned_setup_dir="$runtime_root/operation.$owned_setup_id"
+container_exec sh -eu -c '
+  umask 077
+  mkdir -m 700 -- "$1"
+  printf "%s\n" "$2" >"$1/.setup-owner"
+' sh "$owned_setup_dir" "$owned_setup_token"
+docker exec --interactive --user 0 "$container" sh -s -- \
+  cleanup-owned "$owned_setup_dir" "$owned_setup_id" "$owned_setup_token" \
+  <"$repository_root/scripts/backup/postgres-backup-control.sh" >/dev/null
+container_exec test ! -e "$owned_setup_dir"
+# Repeated setup cleanup is idempotent when the exact path is already absent.
+docker exec --interactive --user 0 "$container" sh -s -- \
+  cleanup-owned "$owned_setup_dir" "$owned_setup_id" "$owned_setup_token" \
+  <"$repository_root/scripts/backup/postgres-backup-control.sh" >/dev/null
+
+foreign_setup_id=00000000000000000000000000000012
+foreign_setup_token=22222222222222222222222222222222
+foreign_setup_dir="$runtime_root/operation.$foreign_setup_id"
+container_exec sh -eu -c '
+  umask 077
+  mkdir -m 700 -- "$1"
+  printf "%s\n" "$2" >"$1/.setup-owner"
+' sh "$foreign_setup_dir" "$foreign_setup_token"
+foreign_cleanup_status=0
+if docker exec --interactive --user 0 "$container" sh -s -- \
+    cleanup-owned "$foreign_setup_dir" "$foreign_setup_id" 33333333333333333333333333333333 \
+    <"$repository_root/scripts/backup/postgres-backup-control.sh" >/dev/null 2>&1; then
+  foreign_cleanup_status=0
+else
+  foreign_cleanup_status=$?
+fi
+[ "$foreign_cleanup_status" -eq 67 ]
+container_exec test -d "$foreign_setup_dir"
+container_exec rm -rf -- "$foreign_setup_dir"
+
+live_setup_id=00000000000000000000000000000013
+live_setup_token=44444444444444444444444444444444
+live_setup_dir="$runtime_root/operation.$live_setup_id"
+container_exec sh -eu -c '
+  umask 077
+  mkdir -m 700 -- "$1"
+  printf "%s\n" "$2" >"$1/.setup-owner"
+  printf "%s:%s\n" "$3" "$4" >"$1/supervisor.identity"
+' sh "$live_setup_dir" "$live_setup_token" "$sentinel_pid" "$sentinel_start"
+live_cleanup_status=0
+if docker exec --interactive --user 0 "$container" sh -s -- \
+    cleanup-owned "$live_setup_dir" "$live_setup_id" "$live_setup_token" \
+    <"$repository_root/scripts/backup/postgres-backup-control.sh" >/dev/null 2>&1; then
+  live_cleanup_status=0
+else
+  live_cleanup_status=$?
+fi
+[ "$live_cleanup_status" -eq 66 ]
+container_exec test -d "$live_setup_dir"
+unrelated_is_live "$sentinel_pid" "$sentinel_start"
+container_exec rm -rf -- "$live_setup_dir"
+
 # A replaced/stale identity must fail closed even when its numeric PID and
 # recorded start time point at a live unrelated process.
 stale_operation_id=00000000000000000000000000000001
@@ -317,4 +378,5 @@ for _ in $(seq 1 100); do container_exec test -e "$legacy_pgpass" || break; slee
 container_exec test ! -e "$legacy_pgpass"
 
 printf '%s\n' 'End-to-end Compose cancellation tests passed for SIGINT, SIGTERM, and TERM-resistant dump KILL escalation; unrelated processes survived.'
+printf '%s\n' 'Setup ownership cleanup accepted only the matching token, was idempotent, and preserved collision/live state.'
 printf '%s\n' 'Legacy attached docker compose exec mutation was rejected by the same cancellation contract.'
