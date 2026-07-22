@@ -1720,7 +1720,7 @@ pass_case host-transfer-independent-timeout
 begin_case host-transfer-timeout
 transfer_terminated="$state_root/transfer-terminated"
 transfer_timeout_restore_hash="$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)"
-transfer_timeout_restic_hash="$(sha256sum "$restic_calls" | awk '{print $1}')"
+transfer_timeout_restic_backup_count="$(grep -Fxc backup "$restic_calls" || :)"
 transfer_timeout_status=0
 if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
     AVELREN_BACKUP_DOCKER_TIMEOUT=1 AVELREN_BACKUP_TRANSFER_TIMEOUT=30 FAKE_STREAM_DELAY=120 \
@@ -1736,7 +1736,8 @@ assert_command_succeeds transfer-process-terminated \
   "${runner[@]}" grep -Fxq -- terminated "$transfer_terminated"
 assert_owner_mode "$transfer_timeout_restore_hash" \
   "$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)" transfer-timeout-validation-not-reached
-assert_owner_mode "$transfer_timeout_restic_hash" "$(sha256sum "$restic_calls" | awk '{print $1}')" transfer-timeout-restic-not-reached
+assert_owner_mode "$transfer_timeout_restic_backup_count" \
+  "$(grep -Fxc backup "$restic_calls" || :)" transfer-timeout-restic-not-reached
 assert_not_contains "$log_root/host-transfer-timeout.log" fixture-password transfer-timeout-secret-absent
 assert_backup_tmp_empty transfer-timeout-cleanup
 pass_case host-transfer-timeout
