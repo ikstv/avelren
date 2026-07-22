@@ -625,9 +625,9 @@ trace_open_line() {
 }
 
 begin_case host-redirection-classification
-probe_root="$test_root/redirection-probe"
-probe_stderr="$log_root/redirection-probe.stderr"
-probe_trace="$test_root/redirection-probe.strace"
+probe_root="$log_root/redirection-probe"
+probe_stderr="$probe_root/probe.stderr"
+probe_trace="$probe_root/probe.strace"
 mkdir -m 700 "$probe_root"
 assert_command_succeeds strace-available command -v strace
 
