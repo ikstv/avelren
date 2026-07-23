@@ -17,6 +17,7 @@ import ua.ikstv.avelren.repository.WorkloadRepository
 class WorkloadViewModel(
     private val workloadRepository: WorkloadRepository,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val loadDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow<WorkloadUiState>(WorkloadUiState.Loading)
@@ -35,7 +36,7 @@ class WorkloadViewModel(
         if (!loading.compareAndSet(false, true)) {
             return
         }
-        viewModelScope.launch {
+        viewModelScope.launch(loadDispatcher) {
             _state.value = WorkloadUiState.Loading
             _state.value = try {
                 WorkloadUiState.Success(withContext(ioDispatcher) {
