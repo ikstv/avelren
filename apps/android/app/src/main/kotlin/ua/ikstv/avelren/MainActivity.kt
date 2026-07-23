@@ -10,6 +10,7 @@ import androidx.activity.viewModels
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.getValue
 import ua.ikstv.avelren.repository.ApiWorkloadRepository
 import ua.ikstv.avelren.repository.WorkloadRepository
 import ua.ikstv.avelren.ui.WorkloadUiState
