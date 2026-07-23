@@ -87,6 +87,9 @@ dependencies {
     implementation(libs.firebase.messaging)
     implementation(libs.firebase.appcheck.playintegrity)
     implementation(libs.firebase.appcheck.playintegrity)
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
@@ -100,5 +103,6 @@ dependencies {
     debugImplementation(libs.firebase.appcheck.debug)
 
     testImplementation(libs.kotlinx.coroutines.core)
+    testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.junit4)
 }
