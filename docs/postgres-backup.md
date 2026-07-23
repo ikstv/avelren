@@ -24,6 +24,8 @@ Custom dump створюється з `--no-owner --no-acl`, копіюєтьс�
 
 Restore drill вибирає `latest` лише серед snapshot-ів із тим самим PostgreSQL tag, приймає рівно один regular dump із production naming/ownership contract і відкриває його один раз через перевірений FD. `createdb`, streaming `pg_restore`, validation і `dropdb` виконуються в одному immutable PostgreSQL container через explicit TCP `127.0.0.1:5432` та root-only `PGPASSFILE` у перевіреному tmpfs; host libpq environment і host `pg_restore` не використовуються. Temporary database має випадкову identity, відмінну від `avelren`; interruption cleanup спочатку зупиняє token-scoped PostgreSQL backend створення, а потім звіряє operation token, cluster identity та database OID. Restore payload видаляється лише після повторної перевірки token та device/inode; mismatch або cleanup failure зберігає state з redacted diagnostic. Root-equivalent host/container attacker або PostgreSQL superuser поза локальною threat model цього drill.
 
+Restore drill пише sanitized operational logs у dedicated `/var/log/avelren`. Canonical `tmpfiles.d` declaration provision-ить цей каталог як `root:root 0700`, не змінюючи owner або mode shared `/var/log`; кожний log file створюється як `root:root 0600`. `AVELREN_RESTORE_LOG_ROOT` лишається fail-closed override: каталог має вже існувати, бути real directory, не symlink, належати root і не мати group/other write bits. Script не створює й не ремонтує override.
+
 ### Точна процедура install/upgrade
 
 Команди нижче виконує root. `release_root` — абсолютний шлях до перевіреного checkout; `deploy_root` — `/opt/avelren`. Не продовжуйте після будь-якої помилки.
@@ -51,7 +53,7 @@ done
   done
 '
 
-install -d -o root -g root -m 0700 "$rollback_root/libexec" "$rollback_root/systemd"
+install -d -o root -g root -m 0700 "$rollback_root/libexec" "$rollback_root/systemd" "$rollback_root/tmpfiles"
 for file in /usr/local/libexec/postgres-tcp-dump.sh /usr/local/libexec/postgres-tcp-restore.sh /usr/local/libexec/postgres-backup-control.sh \
   /usr/local/libexec/restic-password-file.sh /usr/local/libexec/restic-repository.sh /usr/local/libexec/secure-lock-file.sh \
   /usr/local/libexec/avelren-postgres-backup /usr/local/libexec/avelren-postgres-backup-init \
@@ -63,6 +65,13 @@ for unit in avelren-postgres-backup.service avelren-postgres-backup.timer \
   avelren-postgres-repo-check.service avelren-postgres-repo-check.timer; do
   [ ! -e "/etc/systemd/system/$unit" ] || cp -a -- "/etc/systemd/system/$unit" "$rollback_root/systemd/"
 done
+tmpfiles_target=/etc/tmpfiles.d/avelren-restore.conf
+if [ -e "$tmpfiles_target" ] || [ -L "$tmpfiles_target" ]; then
+  [ -f "$tmpfiles_target" ] && [ ! -L "$tmpfiles_target" ] || { echo "ABORT: unsafe restore tmpfiles config" >&2; exit 1; }
+  cp -a -- "$tmpfiles_target" "$rollback_root/tmpfiles/avelren-restore.conf"
+else
+  : >"$rollback_root/tmpfiles/.avelren-restore.conf.absent"
+fi
 cp -a -- "$deploy_root/docker-compose.yml" "$rollback_root/docker-compose.yml"
 
 # Compose додає ephemeral runtime; validate перед replacement і recreate.
@@ -80,6 +89,10 @@ for name in postgres-tcp-dump postgres-tcp-restore postgres-backup-control resti
   install -o root -g root -m 0755 "$release_root/scripts/backup/$name.sh" "/usr/local/libexec/.$name.sh.new"
   mv -T "/usr/local/libexec/.$name.sh.new" "/usr/local/libexec/$name.sh"
 done
+install -o root -g root -m 0644 "$release_root/deploy/tmpfiles.d/avelren-restore.conf" \
+  /etc/tmpfiles.d/.avelren-restore.conf.new
+mv -T /etc/tmpfiles.d/.avelren-restore.conf.new /etc/tmpfiles.d/avelren-restore.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/avelren-restore.conf
 for mapping in \
   postgres-backup-init.sh:avelren-postgres-backup-init \
   postgres-backup-repo-check.sh:avelren-postgres-backup-repo-check \
@@ -121,6 +134,10 @@ done
 for file in /etc/systemd/system/avelren-postgres-{backup,repo-check}.{service,timer}; do
   test "$(stat -c '%U:%G:%a' "$file")" = root:root:644
 done
+cmp -s "$release_root/deploy/tmpfiles.d/avelren-restore.conf" /etc/tmpfiles.d/avelren-restore.conf
+test "$(stat -c '%U:%G:%a' /etc/tmpfiles.d/avelren-restore.conf)" = root:root:644
+test -d /var/log/avelren && test ! -L /var/log/avelren
+test "$(stat -c '%U:%G:%a' /var/log/avelren)" = root:root:700
 bash -n /usr/local/libexec/{postgres-tcp-dump.sh,postgres-tcp-restore.sh,postgres-backup-control.sh,restic-password-file.sh,restic-repository.sh,secure-lock-file.sh,avelren-postgres-backup,avelren-postgres-backup-init,avelren-postgres-backup-repo-check,avelren-postgres-backup-prune,avelren-postgres-restore-drill}
 systemd-analyze verify /etc/systemd/system/avelren-postgres-{backup,repo-check}.{service,timer}
 test "$(systemctl show avelren-postgres-backup.service -p RuntimeDirectory --value)" = avelren
@@ -157,6 +174,16 @@ for file in "$rollback_root"/libexec/*; do
   mv -T "/usr/local/libexec/.${file##*/}.rollback" "/usr/local/libexec/${file##*/}"
 done
 for file in "$rollback_root"/systemd/*; do install -o root -g root -m 0644 "$file" "/etc/systemd/system/${file##*/}"; done
+if [ -f "$rollback_root/tmpfiles/avelren-restore.conf" ]; then
+  install -o root -g root -m 0644 "$rollback_root/tmpfiles/avelren-restore.conf" /etc/tmpfiles.d/.avelren-restore.conf.rollback
+  mv -T /etc/tmpfiles.d/.avelren-restore.conf.rollback /etc/tmpfiles.d/avelren-restore.conf
+elif [ -f "$rollback_root/tmpfiles/.avelren-restore.conf.absent" ]; then
+  rm -f -- /etc/tmpfiles.d/avelren-restore.conf
+else
+  echo "ABORT: restore tmpfiles rollback state is missing" >&2
+  exit 1
+fi
+[ ! -f /etc/tmpfiles.d/avelren-restore.conf ] || systemd-tmpfiles --create /etc/tmpfiles.d/avelren-restore.conf
 install -o root -g root -m 0644 "$rollback_root/docker-compose.yml" /opt/avelren/.docker-compose.yml.rollback
 mv -T /opt/avelren/.docker-compose.yml.rollback /opt/avelren/docker-compose.yml
 systemctl daemon-reload
@@ -165,7 +192,7 @@ docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docke
 docker compose --env-file /opt/avelren/.env.production --file /opt/avelren/docker-compose.yml up -d --wait --wait-timeout 120 postgres
 ```
 
-Повторіть validation для попереднього checkout і лише після PASS знову enable/start timers. Repository init, backup, restore і prune не є частиною install або rollback.
+Повторіть validation для попереднього checkout і лише після PASS знову enable/start timers. Rollback не видаляє dedicated log directory або його журнали. Repository init, backup, restore і prune не є частиною install або rollback.
 
 ## English
 
@@ -191,12 +218,14 @@ The custom dump uses `--no-owner --no-acl` and is copied to the host only after 
 
 ### Exact install/upgrade procedure
 
-Use the complete command blocks in the Ukrainian section above; commands and paths are language-independent. They stop and disable both timers, stop active oneshot services, abort if either service remains active, verify that no old or new runtime operation exists, save an executable rollback set, install and recreate the Compose tmpfs, install the secure-lock and other helper/control/support scripts first and the main script second, install systemd units last, and run `daemon-reload`.
+Use the complete command blocks in the Ukrainian section above; commands and paths are language-independent. They stop and disable both timers, stop active oneshot services, abort if either service remains active, verify that no old or new runtime operation exists, save an executable rollback set, install and recreate the Compose tmpfs, install the secure-lock and other helper/control/support scripts first, provision the dedicated restore log directory through `tmpfiles.d`, install the main script second, install systemd units last, and run `daemon-reload`.
 
-The validation block contains no source/destination placeholders: `release_root` is resolved from the verified checkout with `git rev-parse`. It compares every exact source/destination pair, verifies ownership/modes and shell syntax, validates systemd units and Compose, and confirms runtime mode `0700`. It does not run backup, restore, prune, or repository initialization. Enable/start timers only after every command passes. A missing, non-executable, mismatched helper or non-tmpfs runtime is an unconditional abort.
+The validation block contains no source/destination placeholders: `release_root` is resolved from the verified checkout with `git rev-parse`. It compares every exact source/destination pair, verifies the `tmpfiles.d` declaration and the `root:root 0700` log directory, verifies ownership/modes and shell syntax, validates systemd units and Compose, and confirms runtime mode `0700`. It does not run backup, restore, prune, or repository initialization. Enable/start timers only after every command passes. A missing, non-executable, mismatched helper, unsafe log directory, or non-tmpfs runtime is an unconditional abort.
 
 ### Rollback
 
-Use the rollback block above with the exact timestamped `rollback_root`. It stops/disables timers, stops both oneshot services and aborts if they remain active, restores the previous main script before its matching helpers, restores units and Compose, runs `daemon-reload`, recreates PostgreSQL under the previous Compose definition, and requires validation against the previous checkout before timers may be enabled again. Repository initialization, backup, restore, and prune are never part of install or rollback.
+Use the rollback block above with the exact timestamped `rollback_root`. It stops/disables timers, stops both oneshot services and aborts if they remain active, restores the previous main script before its matching helpers, restores the prior `tmpfiles.d` state, units, and Compose, runs `daemon-reload`, recreates PostgreSQL under the previous Compose definition, and requires validation against the previous checkout before timers may be enabled again. Rollback does not delete the dedicated log directory or its logs. Repository initialization, backup, restore, and prune are never part of install or rollback.
 
 The restore drill selects `latest` only within the producer's PostgreSQL tag, accepts exactly one regular dump matching the production naming/ownership contract, and opens it once through a verified FD. `createdb`, streaming `pg_restore`, validation, and `dropdb` use one immutable PostgreSQL container over explicit TCP `127.0.0.1:5432` with a root-only tmpfs `PGPASSFILE`; host libpq settings and host `pg_restore` are not used. The random temporary database differs from `avelren`; interruption cleanup first stops the token-scoped PostgreSQL creation backend, then checks the operation token, cluster identity, and recorded database OID. Restore payload removal revalidates the token and device/inode, while a mismatch or cleanup failure preserves state with a redacted diagnostic. A root-equivalent host/container attacker or PostgreSQL superuser is outside this drill's local threat model.
+
+The restore drill writes sanitized operational logs to dedicated `/var/log/avelren`. The canonical `tmpfiles.d` declaration provisions it as `root:root 0700` without changing the owner or mode of shared `/var/log`; each log file is created as `root:root 0600`. `AVELREN_RESTORE_LOG_ROOT` remains a fail-closed override: the path must already exist as a real non-symlink directory, be root-owned, and have no group/other write bits. The script neither creates nor repairs an override.
