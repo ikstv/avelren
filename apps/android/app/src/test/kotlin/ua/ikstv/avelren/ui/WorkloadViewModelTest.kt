@@ -2,7 +2,7 @@ package ua.ikstv.avelren.ui
 
 import java.time.Instant
 import kotlin.coroutines.ContinuationInterceptor
-import kotlin.coroutines.currentCoroutineContext
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -199,7 +199,7 @@ private class DispatchInspectingWorkloadRepository(
         private set
 
     override suspend fun getLatest(): WorkloadSnapshot {
-        val currentDispatcher = currentCoroutineContext()[ContinuationInterceptor] as? CoroutineDispatcher
+        val currentDispatcher = coroutineContext[ContinuationInterceptor] as? CoroutineDispatcher
         if (currentDispatcher == expectedMainDispatcher) {
             calledOnMainDispatcher = true
         }
