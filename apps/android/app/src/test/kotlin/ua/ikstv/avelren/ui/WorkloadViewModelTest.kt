@@ -92,10 +92,12 @@ class WorkloadViewModelTest {
         val viewModel = WorkloadViewModel(repository, dispatcher)
 
         advanceUntilIdle()
+        runCurrent()
         assertTrue(viewModel.state.value is WorkloadUiState.Error)
         assertEquals(1, repository.calls)
 
         viewModel.retry()
+        runCurrent()
         advanceUntilIdle()
 
         assertEquals(2, repository.calls)
