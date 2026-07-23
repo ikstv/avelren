@@ -106,7 +106,9 @@ trap cleanup EXIT
 [ "$(uname -s)" = Linux ] || fail 'restore safety tests require Linux'
 [ -x "$drill" ] || fail 'restore drill is not executable'
 [ -x "$helper" ] || fail 'restore TCP helper is not executable'
-[ -f "$tmpfiles_config" ] && [ ! -L "$tmpfiles_config" ] || fail 'restore tmpfiles config is unavailable'
+if [ ! -f "$tmpfiles_config" ] || [ -L "$tmpfiles_config" ]; then
+  fail 'restore tmpfiles config is unavailable'
+fi
 [ -f "$documentation" ] || fail 'backup documentation is unavailable'
 if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null 2>&1 || fail 'sudo is required for root restore tests'
@@ -139,7 +141,9 @@ ubuntu_log_gid="$(getent group syslog 2>/dev/null | awk -F: 'NR == 1 { print $3 
 case "$ubuntu_log_gid" in ''|0|*[!0-9]*) ubuntu_log_gid=65534 ;; esac
 "${root_runner[@]}" install -d -o root -g "$ubuntu_log_gid" -m 0775 "$ubuntu_log_root"
 ubuntu_log_root_identity="$("${root_runner[@]}" stat -c '%d:%i:%u:%g:%a' "$ubuntu_log_root")"
-[ ! -e "$production_log_root" ] && [ ! -L "$production_log_root" ] || fail 'dedicated restore log fixture already exists'
+if [ -e "$production_log_root" ] || [ -L "$production_log_root" ]; then
+  fail 'dedicated restore log fixture already exists'
+fi
 grep -Fxq 'd /var/log/avelren 0700 root root -' "$tmpfiles_config" || fail 'restore tmpfiles declaration is invalid'
 "${root_runner[@]}" systemd-tmpfiles --create --root="$tmpfiles_root" avelren-restore.conf
 [ "$("${root_runner[@]}" stat -c '%u:%g:%a' "$production_log_root")" = 0:0:700 ] ||
