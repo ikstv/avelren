@@ -3,11 +3,13 @@ package ua.ikstv.avelren.ui
 import java.time.Instant
 import kotlin.coroutines.ContinuationInterceptor
 import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -21,6 +23,7 @@ import ua.ikstv.avelren.domain.WorkloadFreshness
 import ua.ikstv.avelren.domain.WorkloadSnapshot
 import ua.ikstv.avelren.repository.WorkloadRepository
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class WorkloadViewModelTest {
     private val defaultSnapshot = WorkloadSnapshot(
         locationId = "demo",
@@ -34,126 +37,146 @@ class WorkloadViewModelTest {
 
     @Test
     fun `initial state is loading`() = runTest {
-        val repository = SequencedWorkloadRepository(listOf(Result.success(defaultSnapshot)))
-        val viewModel = WorkloadViewModel(
-            workloadRepository = repository,
-            ioDispatcher = StandardTestDispatcher(testScheduler),
-        )
+        withMainDispatcher(testScheduler) { dispatcher ->
+            val repository = SequencedWorkloadRepository(listOf(Result.success(defaultSnapshot)))
+            val viewModel = WorkloadViewModel(
+                workloadRepository = repository,
+                ioDispatcher = dispatcher,
+            )
 
-        assertTrue(viewModel.state.value is WorkloadUiState.Loading)
+            assertTrue(viewModel.state.value is WorkloadUiState.Loading)
+        }
     }
 
     @Test
     fun `successful load updates state to success`() = runTest {
-        val repository = SequencedWorkloadRepository(listOf(Result.success(defaultSnapshot)))
-        val viewModel = WorkloadViewModel(
-            workloadRepository = repository,
-            ioDispatcher = StandardTestDispatcher(testScheduler),
-        )
+        withMainDispatcher(testScheduler) { dispatcher ->
+            val repository = SequencedWorkloadRepository(listOf(Result.success(defaultSnapshot)))
+            val viewModel = WorkloadViewModel(
+                workloadRepository = repository,
+                ioDispatcher = dispatcher,
+            )
 
-        advanceUntilIdle()
+            advanceUntilIdle()
 
-        assertEquals(1, repository.calls)
-        assertEquals(
-            WorkloadUiState.Success(defaultSnapshot),
-            viewModel.state.value,
-        )
+            assertEquals(1, repository.calls)
+            assertEquals(
+                WorkloadUiState.Success(defaultSnapshot),
+                viewModel.state.value,
+            )
+        }
     }
 
     @Test
     fun `error load updates state to error`() = runTest {
-        val repository = SequencedWorkloadRepository(listOf(Result.failure(IllegalStateException("boom"))))
-        val viewModel = WorkloadViewModel(
-            workloadRepository = repository,
-            ioDispatcher = StandardTestDispatcher(testScheduler),
-        )
+        withMainDispatcher(testScheduler) { dispatcher ->
+            val repository = SequencedWorkloadRepository(
+                listOf(Result.failure(IllegalStateException("boom"))),
+            )
+            val viewModel = WorkloadViewModel(
+                workloadRepository = repository,
+                ioDispatcher = dispatcher,
+            )
 
-        advanceUntilIdle()
+            advanceUntilIdle()
 
-        assertEquals(1, repository.calls)
-        assertTrue(viewModel.state.value is WorkloadUiState.Error)
+            assertEquals(1, repository.calls)
+            assertTrue(viewModel.state.value is WorkloadUiState.Error)
+        }
     }
 
     @Test
     fun `retry after error performs another repository call`() = runTest {
-        val repository = SequencedWorkloadRepository(
-            listOf(
-                Result.failure(IllegalStateException("boom")),
-                Result.success(defaultSnapshot),
-            ),
-        )
-        val dispatcher = StandardTestDispatcher(testScheduler)
-        val viewModel = WorkloadViewModel(repository, dispatcher)
+        withMainDispatcher(testScheduler) { dispatcher ->
+            val repository = SequencedWorkloadRepository(
+                listOf(
+                    Result.failure(IllegalStateException("boom")),
+                    Result.success(defaultSnapshot),
+                ),
+            )
+            val viewModel = WorkloadViewModel(repository, dispatcher)
 
-        advanceUntilIdle()
-        assertTrue(viewModel.state.value is WorkloadUiState.Error)
-        assertEquals(1, repository.calls)
+            advanceUntilIdle()
+            assertTrue(viewModel.state.value is WorkloadUiState.Error)
+            assertEquals(1, repository.calls)
 
-        viewModel.retry()
-        advanceUntilIdle()
+            viewModel.retry()
+            advanceUntilIdle()
 
-        assertEquals(2, repository.calls)
-        assertEquals(
-            WorkloadUiState.Success(defaultSnapshot),
-            viewModel.state.value,
-        )
+            assertEquals(2, repository.calls)
+            assertEquals(
+                WorkloadUiState.Success(defaultSnapshot),
+                viewModel.state.value,
+            )
+        }
     }
 
     @Test
     fun `retries while loading are ignored`() = runTest {
-        val repository = DelayedWorkloadRepository(defaultSnapshot, 1_000)
-        val dispatcher = StandardTestDispatcher(testScheduler)
-        val viewModel = WorkloadViewModel(repository, dispatcher)
+        withMainDispatcher(testScheduler) { dispatcher ->
+            val repository = DelayedWorkloadRepository(defaultSnapshot, 1_000)
+            val viewModel = WorkloadViewModel(repository, dispatcher)
 
-        runCurrent()
-        assertEquals(1, repository.calls)
+            runCurrent()
+            assertEquals(1, repository.calls)
 
-        viewModel.retry()
-        viewModel.retry()
-        assertEquals(1, repository.calls)
+            viewModel.retry()
+            viewModel.retry()
+            assertEquals(1, repository.calls)
 
-        advanceUntilIdle()
-        assertEquals(1, repository.calls)
-        assertEquals(WorkloadUiState.Success(defaultSnapshot), viewModel.state.value)
+            advanceUntilIdle()
+            assertEquals(1, repository.calls)
+            assertEquals(WorkloadUiState.Success(defaultSnapshot), viewModel.state.value)
+        }
     }
 
     @Test
     fun `repository is never called on main dispatcher`() = runTest {
-        val mainDispatcher = StandardTestDispatcher(testScheduler)
-        val ioDispatcher = StandardTestDispatcher(testScheduler)
-        Dispatchers.setMain(mainDispatcher)
-        try {
+        withMainDispatcher(testScheduler) { dispatcher ->
             val repository = DispatchInspectingWorkloadRepository(
                 workload = defaultSnapshot,
-                expectedMainDispatcher = mainDispatcher,
-                expectedWorkloadDispatcher = ioDispatcher,
+                expectedMainDispatcher = dispatcher,
+                expectedWorkloadDispatcher = dispatcher,
             )
 
-            val viewModel = WorkloadViewModel(repository, ioDispatcher)
+            val viewModel = WorkloadViewModel(repository, dispatcher)
             advanceUntilIdle()
 
             assertFalse(repository.calledOnMainDispatcher)
             assertTrue(repository.calledOnExpectedDispatcher)
-        } finally {
-            Dispatchers.resetMain()
         }
     }
 
     @Test
     fun `recomposition does not start additional load`() = runTest {
-        val repository = SequencedWorkloadRepository(listOf(Result.success(defaultSnapshot)))
-        val viewModel = WorkloadViewModel(
-            workloadRepository = repository,
-            ioDispatcher = StandardTestDispatcher(testScheduler),
-        )
+        withMainDispatcher(testScheduler) { dispatcher ->
+            val repository = SequencedWorkloadRepository(listOf(Result.success(defaultSnapshot)))
+            val viewModel = WorkloadViewModel(
+                workloadRepository = repository,
+                ioDispatcher = dispatcher,
+            )
 
-        advanceUntilIdle()
-        assertEquals(1, repository.calls)
-
-        repeat(3) {
-            val state: StateFlow<WorkloadUiState> = viewModel.state
+            advanceUntilIdle()
             assertEquals(1, repository.calls)
-            assertEquals(WorkloadUiState.Success(defaultSnapshot), state.value)
+
+            repeat(3) {
+                val state: StateFlow<WorkloadUiState> = viewModel.state
+                assertEquals(1, repository.calls)
+                assertEquals(WorkloadUiState.Success(defaultSnapshot), state.value)
+            }
+        }
+    }
+
+    private fun withMainDispatcher(
+        testScheduler: TestCoroutineScheduler,
+        block: (CoroutineDispatcher) -> Unit,
+    ) {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        try {
+            block(dispatcher)
+        } finally {
+            Dispatchers.resetMain()
         }
     }
 }
