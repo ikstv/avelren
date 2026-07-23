@@ -60,6 +60,10 @@ else
     'host-partial-stream|partial dump stream is cleaned up'
     'host-transfer-independent-timeout|dump transfer is independent from short Docker timeout'
     'host-transfer-timeout|overlong dump transfer fails bounded and stops before validation'
+    'host-container-validation|transferred dump is validated in the PostgreSQL container without host pg_restore'
+    'host-invalid-dump-validation|invalid transferred dump fails before Restic backup'
+    'host-validation-timeout|container dump validation timeout is bounded'
+    'rclone-read-only-warning|read-only rclone config warning remains visible and unchanged'
     'repository-below-warning|repository below warning threshold succeeds'
     'runtime-stale-state|stale runtime state is rejected'
     'operation-collision-retry|operation collision preserves existing state'
@@ -156,6 +160,13 @@ assert_contains "$root/scripts/backup/postgres-backup.sh" 'transfer_timeout="${A
 # shellcheck disable=SC2016
 assert_contains "$root/scripts/backup/postgres-backup.sh" '[ "$transfer_timeout" -ge 30 ] && [ "$transfer_timeout" -le 7200 ]' transfer-timeout-range
 assert_contains "$root/scripts/backup/postgres-backup.sh" 'docker_transfer_timed exec --user 0' transfer-timeout-streaming
+assert_contains "$root/scripts/backup/postgres-backup.sh" 'docker_transfer_timed exec --interactive --user 0' validation-transfer-timeout
+# This is a literal source-code assertion.
+# shellcheck disable=SC2016
+assert_contains "$root/scripts/backup/postgres-backup.sh" '"$container" pg_restore --list <"$dump"' container-pg-restore-validation
+# This is a literal source-code assertion.
+# shellcheck disable=SC2016
+assert_not_contains "$root/scripts/backup/postgres-backup.sh" 'pg_restore --list "$dump"' direct-host-pg-restore-absent
 # This is a literal source-code assertion.
 # shellcheck disable=SC2016
 assert_contains "$root/scripts/backup/postgres-backup.sh" '[ "$dump_create_status" -ne 0 ] || [ -z "${dump_fd:-}" ]' dump-fd-guarded-after-open
@@ -361,6 +372,18 @@ case "$args" in
     cat >/dev/null
     exit "${FAKE_EFFECTIVE_TMPFS_STATUS:-0}"
     ;;
+  *'exec --interactive --user 0 fake-postgres pg_restore --list'*)
+    [ -z "${FAKE_CONTAINER_VALIDATION_CALLS:-}" ] || printf '%s\n' "$args" >>"$FAKE_CONTAINER_VALIDATION_CALLS"
+    if [ -n "${FAKE_VALIDATION_TERMINATED:-}" ]; then
+      trap 'printf "%s\n" terminated >"$FAKE_VALIDATION_TERMINATED"; exit 143' TERM
+    fi
+    validation_input="$(cat)"
+    if [ -n "${FAKE_VALIDATION_DELAY:-}" ]; then sleep "$FAKE_VALIDATION_DELAY"; fi
+    if [ "${FAKE_VALIDATION_FAIL:-0}" = 1 ] || [ "$validation_input" != fake-custom-format-dump ]; then
+      printf 'Injected container pg_restore validation failure. %s\n' "${FAKE_VALIDATION_SECRET:-}" >&2
+      exit 78
+    fi
+    ;;
   *'exec --user 0 fake-postgres sh -eu -c'*postgres.dump*)
     if [ -n "${FAKE_STREAM_TERMINATED:-}" ]; then
       trap 'printf "%s\n" terminated >"$FAKE_STREAM_TERMINATED"; exit 143' TERM
@@ -371,7 +394,11 @@ case "$args" in
       printf '%s\n' 'Injected PostgreSQL dump stream failure.' >&2
       exit 79
     fi
-    printf '%s\n' fake-custom-format-dump
+    if [ "${FAKE_INVALID_DUMP:-0}" = 1 ]; then
+      printf '%s\n' truncated-custom-format-dump
+    else
+      printf '%s\n' fake-custom-format-dump
+    fi
     ;;
   *'exec --user 0 fake-postgres sh -eu -c'*)
     [ "${FAKE_STALE_RUNTIME:-0}" = 0 ] || exit 74
@@ -470,6 +497,9 @@ cat >"$fake_bin/rclone" <<'FAKE_RCLONE'
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >>"$FAKE_RCLONE_CALLS"
+if [ "${FAKE_RCLONE_READ_ONLY_WARNING:-0}" = 1 ]; then
+  printf '%s\n' 'ERROR : Failed to save config after 10 tries: failed to create temp file for new config: open /etc/avelren/backup/rclone.conf.test: read-only file system' >&2
+fi
 case "$*" in
   *'size --json'*) printf '{"bytes":%s}\n' "${FAKE_REPOSITORY_BYTES:-0}" ;;
   *) exit 0 ;;
@@ -511,7 +541,8 @@ FAKE_RESTIC
 cat >"$fake_bin/pg_restore" <<'FAKE_PG_RESTORE'
 #!/usr/bin/env bash
 [ -z "${FAKE_PG_RESTORE_CALLS:-}" ] || printf '%s\n' "$*" >>"$FAKE_PG_RESTORE_CALLS"
-exit 0
+printf '%s\n' 'Host pg_restore is intentionally unavailable in this fixture.' >&2
+exit 127
 FAKE_PG_RESTORE
 cat >"$fake_bin/date" <<'FAKE_DATE'
 #!/usr/bin/env bash
@@ -577,6 +608,8 @@ fi
 rclone_calls="$state_root/rclone-calls"
 restic_repositories="$state_root/restic-repositories"
 restic_calls="$state_root/restic-calls"
+container_validation_calls="$state_root/container-validation-calls"
+host_pg_restore_calls="$state_root/host-pg-restore-calls"
 docker_state="$state_root/docker-state"
 dump_mode="$state_root/dump-mode"
 operation_root="$state_root/operations"
@@ -585,8 +618,8 @@ setup_cleanup_trace="$state_root/setup-cleanup-trace"
 setup_phase_trace="$state_root/setup-phase-trace"
 detached_reached="$state_root/detached-reached"
 mkdir -m 700 "$operation_root"
-touch "$rclone_calls" "$restic_repositories" "$restic_calls"
-root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$production_lock/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$state_root/db-created" "FAKE_DB_DROPPED=$state_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories" "FAKE_RESTIC_CALLS=$restic_calls" "FAKE_PG_RESTORE_CALLS=$state_root/pg-restore-calls" "FAKE_COLLISION_PROOF=$state_root/collision-proof")
+touch "$rclone_calls" "$restic_repositories" "$restic_calls" "$container_validation_calls" "$host_pg_restore_calls"
+root_env=("PATH=$fake_bin:$PATH" "AVELREN_ENV_FILE=$test_root/env" "AVELREN_COMPOSE_FILE=$test_root/compose.yml" "AVELREN_BACKUP_TMP_ROOT=$backup_tmp" "AVELREN_BACKUP_LOCK_FILE=$production_lock/backup.lock" "AVELREN_RCLONE_REMOTE=test-remote" "AVELREN_RESTIC_PASSWORD_FILE=$password" "AVELREN_RCLONE_CONFIG=$config" "FAKE_DB_CREATED=$state_root/db-created" "FAKE_DB_DROPPED=$state_root/db-dropped" "FAKE_RCLONE_CALLS=$rclone_calls" "FAKE_RESTIC_REPOSITORIES=$restic_repositories" "FAKE_RESTIC_CALLS=$restic_calls" "FAKE_CONTAINER_VALIDATION_CALLS=$container_validation_calls" "FAKE_PG_RESTORE_CALLS=$host_pg_restore_calls" "FAKE_COLLISION_PROOF=$state_root/collision-proof")
 root_env+=("FAKE_DOCKER_STATE=$docker_state")
 root_env+=("FAKE_DUMP_MODE=$dump_mode")
 root_env+=("FAKE_OPERATION_ROOT=$operation_root" "FAKE_SETUP_CONTROL_FILE=$setup_control_file" "FAKE_SETUP_CLEANUP_TRACE=$setup_cleanup_trace" "FAKE_DETACHED_REACHED=$detached_reached")
@@ -1688,7 +1721,7 @@ for injected_failure in FAKE_TMPDIR_CHMOD_FAIL FAKE_DUMP_STAT_FAIL FAKE_DUMP_IDE
 done
 
 begin_case host-partial-stream
-partial_stream_restore_hash="$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)"
+partial_stream_restore_hash="$(sha256sum "$container_validation_calls" 2>/dev/null | awk '{print $1}' || :)"
 partial_stream_restic_backup_count="$(grep -Fxc backup "$restic_calls" || :)"
 partial_stream_status=0
 if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_STREAM_FAIL=1 \
@@ -1700,7 +1733,7 @@ fi
 assert_status 79 "$partial_stream_status" partial-stream-status
 assert_contains "$log_root/host-partial-stream.log" 'Injected PostgreSQL dump stream failure.' partial-stream-marker
 assert_owner_mode "$partial_stream_restore_hash" \
-  "$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)" partial-stream-validation-not-reached
+  "$(sha256sum "$container_validation_calls" 2>/dev/null | awk '{print $1}' || :)" partial-stream-validation-not-reached
 assert_owner_mode "$partial_stream_restic_backup_count" \
   "$(grep -Fxc backup "$restic_calls" || :)" partial-stream-restic-not-reached
 assert_backup_tmp_empty partial-stream-cleanup
@@ -1717,7 +1750,7 @@ pass_case host-transfer-independent-timeout
 
 begin_case host-transfer-timeout
 transfer_terminated="$state_root/transfer-terminated"
-transfer_timeout_restore_hash="$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)"
+transfer_timeout_restore_hash="$(sha256sum "$container_validation_calls" 2>/dev/null | awk '{print $1}' || :)"
 transfer_timeout_restic_backup_count="$(grep -Fxc backup "$restic_calls" || :)"
 transfer_timeout_status=0
 if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
@@ -1733,12 +1766,86 @@ assert_contains "$log_root/host-transfer-timeout.log" 'PostgreSQL dump transfer 
 assert_command_succeeds transfer-process-terminated \
   "${runner[@]}" grep -Fxq -- terminated "$transfer_terminated"
 assert_owner_mode "$transfer_timeout_restore_hash" \
-  "$(sha256sum "$state_root/pg-restore-calls" 2>/dev/null | awk '{print $1}' || :)" transfer-timeout-validation-not-reached
+  "$(sha256sum "$container_validation_calls" 2>/dev/null | awk '{print $1}' || :)" transfer-timeout-validation-not-reached
 assert_owner_mode "$transfer_timeout_restic_backup_count" \
   "$(grep -Fxc backup "$restic_calls" || :)" transfer-timeout-restic-not-reached
 assert_not_contains "$log_root/host-transfer-timeout.log" fixture-password transfer-timeout-secret-absent
 assert_backup_tmp_empty transfer-timeout-cleanup
 pass_case host-transfer-timeout
+
+begin_case host-container-validation
+container_validation_before="$(wc -l <"$container_validation_calls")"
+host_validation_before="$(wc -l <"$host_pg_restore_calls")"
+container_validation_backup_before="$(grep -Fxc backup "$restic_calls" || :)"
+diagnostics_set_assertion container-validation-success
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
+  "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-container-validation.log" 2>&1
+container_validation_after="$(wc -l <"$container_validation_calls")"
+host_validation_after="$(wc -l <"$host_pg_restore_calls")"
+container_validation_backup_after="$(grep -Fxc backup "$restic_calls" || :)"
+assert_owner_mode "$((container_validation_before + 1))" "$container_validation_after" container-validation-reached
+assert_contains "$container_validation_calls" 'exec --interactive --user 0 fake-postgres pg_restore --list' container-validation-command
+assert_owner_mode "$host_validation_before" "$host_validation_after" host-pg-restore-not-called
+assert_owner_mode "$((container_validation_backup_before + 1))" "$container_validation_backup_after" container-validation-restic-reached
+assert_contains "$log_root/host-container-validation.log" 'PostgreSQL backup completed.' container-validation-completed
+assert_backup_tmp_empty container-validation-cleanup
+pass_case host-container-validation
+
+begin_case host-invalid-dump-validation
+invalid_validation_before="$(wc -l <"$container_validation_calls")"
+invalid_validation_backup_before="$(grep -Fxc backup "$restic_calls" || :)"
+invalid_validation_status=0
+if "${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" \
+    FAKE_INVALID_DUMP=1 FAKE_VALIDATION_SECRET=fixture-password \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-invalid-dump-validation.log" 2>&1; then
+  invalid_validation_status=0
+else
+  invalid_validation_status=$?
+fi
+assert_status 1 "$invalid_validation_status" invalid-validation-status
+assert_owner_mode "$((invalid_validation_before + 1))" "$(wc -l <"$container_validation_calls")" invalid-validation-reached
+assert_owner_mode "$invalid_validation_backup_before" "$(grep -Fxc backup "$restic_calls" || :)" invalid-validation-restic-not-reached
+assert_contains "$log_root/host-invalid-dump-validation.log" 'PostgreSQL dump validation failed.' invalid-validation-diagnostic
+assert_not_contains "$log_root/host-invalid-dump-validation.log" 'Injected container pg_restore validation failure.' invalid-validation-stderr-redacted
+assert_not_contains "$log_root/host-invalid-dump-validation.log" fixture-password invalid-validation-secret-absent
+assert_backup_tmp_empty invalid-validation-cleanup
+pass_case host-invalid-dump-validation
+
+begin_case host-validation-timeout
+validation_terminated="$state_root/validation-terminated"
+validation_timeout_before="$(wc -l <"$container_validation_calls")"
+validation_timeout_backup_before="$(grep -Fxc backup "$restic_calls" || :)"
+validation_timeout_status=0
+remove_runner_or_root_fixture "$validation_terminated" validation-timeout-marker-reset
+if "${runner[@]}" timeout --signal=TERM --kill-after=1s 40s env "${root_env[@]}" \
+    FAKE_REPOSITORY_BYTES="$below_warning" AVELREN_BACKUP_TRANSFER_TIMEOUT=30 \
+    AVELREN_BACKUP_TERMINATION_TIMEOUT=2 FAKE_VALIDATION_DELAY=120 \
+    FAKE_VALIDATION_TERMINATED="$validation_terminated" \
+    "$root/scripts/backup/postgres-backup.sh" >"$log_root/host-validation-timeout.log" 2>&1; then
+  validation_timeout_status=0
+else
+  validation_timeout_status=$?
+fi
+assert_status 1 "$validation_timeout_status" validation-timeout-status
+assert_owner_mode "$((validation_timeout_before + 1))" "$(wc -l <"$container_validation_calls")" validation-timeout-reached
+assert_command_succeeds validation-process-terminated \
+  "${runner[@]}" grep -Fxq -- terminated "$validation_terminated"
+assert_owner_mode "$validation_timeout_backup_before" "$(grep -Fxc backup "$restic_calls" || :)" validation-timeout-restic-not-reached
+assert_contains "$log_root/host-validation-timeout.log" 'PostgreSQL dump validation failed.' validation-timeout-diagnostic
+assert_not_contains "$log_root/host-validation-timeout.log" fixture-password validation-timeout-secret-absent
+assert_backup_tmp_empty validation-timeout-cleanup
+pass_case host-validation-timeout
+
+begin_case rclone-read-only-warning
+readonly_warning='ERROR : Failed to save config after 10 tries: failed to create temp file for new config: open /etc/avelren/backup/rclone.conf.test: read-only file system'
+diagnostics_set_assertion rclone-read-only-warning-preserved
+"${runner[@]}" env "${root_env[@]}" FAKE_REPOSITORY_BYTES="$below_warning" FAKE_RCLONE_READ_ONLY_WARNING=1 \
+  "$root/scripts/backup/postgres-backup.sh" >"$log_root/rclone-read-only-warning.log" 2>&1
+assert_contains "$log_root/rclone-read-only-warning.log" "$readonly_warning" rclone-read-only-warning-exact
+assert_contains "$log_root/rclone-read-only-warning.log" 'PostgreSQL backup completed.' rclone-read-only-warning-backup-completed
+assert_not_contains "$log_root/rclone-read-only-warning.log" fixture-password rclone-read-only-warning-secret-absent
+assert_backup_tmp_empty rclone-read-only-warning-cleanup
+pass_case rclone-read-only-warning
 
 begin_case repository-below-warning
 diagnostics_set_assertion backup-command-success

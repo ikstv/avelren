@@ -394,6 +394,12 @@ exec {dump_fd}>&-
 control cleanup "$control_dir" "$operation_id" >/dev/null
 operation_active=0
 [ -s "$dump" ] || { printf '%s\n' 'PostgreSQL dump is empty.' >&2; exit 1; }
-pg_restore --list "$dump" >/dev/null 2>"$tmpdir/pg_restore.stderr" || { printf '%s\n' 'PostgreSQL dump validation failed.' >&2; exit 1; }
+validation_status=0
+docker_transfer_timed exec --interactive --user 0 \
+  "$container" pg_restore --list <"$dump" >/dev/null 2>"$tmpdir/pg_restore.stderr" || validation_status=$?
+if [ "$validation_status" -ne 0 ]; then
+  printf '%s\n' 'PostgreSQL dump validation failed.' >&2
+  exit 1
+fi
 RCLONE_CONFIG="$rclone_config" RESTIC_REPOSITORY="$RESTIC_REPOSITORY_URL" restic backup --password-file "$password_file" --tag "$RESTIC_POSTGRES_TAG" "$dump" >/dev/null
 printf '%s\n' 'PostgreSQL backup completed.'
