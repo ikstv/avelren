@@ -4,6 +4,8 @@ set -Eeuo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 drill="$root/scripts/backup/postgres-restore-drill.sh"
 helper="$root/scripts/backup/postgres-tcp-restore.sh"
+tmpfiles_config="$root/deploy/tmpfiles.d/avelren-restore.conf"
+documentation="$root/docs/postgres-backup.md"
 disposable_base="${RUNNER_TEMP:-/tmp}"
 test_root=
 capture_root=
@@ -104,6 +106,8 @@ trap cleanup EXIT
 [ "$(uname -s)" = Linux ] || fail 'restore safety tests require Linux'
 [ -x "$drill" ] || fail 'restore drill is not executable'
 [ -x "$helper" ] || fail 'restore TCP helper is not executable'
+[ -f "$tmpfiles_config" ] && [ ! -L "$tmpfiles_config" ] || fail 'restore tmpfiles config is unavailable'
+[ -f "$documentation" ] || fail 'backup documentation is unavailable'
 if [ "$(id -u)" -ne 0 ]; then
   command -v sudo >/dev/null 2>&1 || fail 'sudo is required for root restore tests'
   sudo -n true >/dev/null 2>&1 || fail 'passwordless sudo is required for root restore tests'
@@ -120,11 +124,38 @@ production_lock="$lock_root/avelren"
 state_root="$capture_root/state"
 fixture_root="$capture_root/fixtures"
 log_root="$capture_root/logs"
-production_log_root="$test_root/production-log"
-mkdir -m 700 "$fake_bin" "$production_tmp" "$state_root" "$fixture_root" "$log_root" "$production_log_root"
+tmpfiles_root="$test_root/tmpfiles-root"
+ubuntu_log_root="$tmpfiles_root/var/log"
+production_log_root="$ubuntu_log_root/avelren"
+mkdir -m 700 "$fake_bin" "$production_tmp" "$state_root" "$fixture_root" "$log_root" "$tmpfiles_root"
+mkdir -p "$tmpfiles_root/etc/tmpfiles.d"
+chmod 700 "$tmpfiles_root/etc" "$tmpfiles_root/etc/tmpfiles.d"
+printf '%s\n' 'root:x:0:0:root:/root:/bin/sh' >"$tmpfiles_root/etc/passwd"
+printf '%s\n' 'root:x:0:' >"$tmpfiles_root/etc/group"
+cp -- "$tmpfiles_config" "$tmpfiles_root/etc/tmpfiles.d/avelren-restore.conf"
 "${root_runner[@]}" mkdir -m 700 -- "$production_lock"
 "${root_runner[@]}" chown root:root "$lock_root" "$production_lock"
-"${root_runner[@]}" chown root:root "$production_log_root"
+ubuntu_log_gid="$(getent group syslog 2>/dev/null | awk -F: 'NR == 1 { print $3 }' || true)"
+case "$ubuntu_log_gid" in ''|0|*[!0-9]*) ubuntu_log_gid=65534 ;; esac
+"${root_runner[@]}" install -d -o root -g "$ubuntu_log_gid" -m 0775 "$ubuntu_log_root"
+ubuntu_log_root_identity="$("${root_runner[@]}" stat -c '%d:%i:%u:%g:%a' "$ubuntu_log_root")"
+[ ! -e "$production_log_root" ] && [ ! -L "$production_log_root" ] || fail 'dedicated restore log fixture already exists'
+grep -Fxq 'd /var/log/avelren 0700 root root -' "$tmpfiles_config" || fail 'restore tmpfiles declaration is invalid'
+"${root_runner[@]}" systemd-tmpfiles --create --root="$tmpfiles_root" avelren-restore.conf
+[ "$("${root_runner[@]}" stat -c '%u:%g:%a' "$production_log_root")" = 0:0:700 ] ||
+  fail 'restore tmpfiles provisioning did not create root:root 0700 directory'
+[ "$("${root_runner[@]}" stat -c '%d:%i:%u:%g:%a' "$ubuntu_log_root")" = "$ubuntu_log_root_identity" ] ||
+  fail 'restore tmpfiles provisioning changed the shared log directory'
+default_log_root="log_root=\"\${AVELREN_RESTORE_LOG_ROOT:-/var/log/avelren}\""
+grep -Fqx "$default_log_root" "$drill" ||
+  fail 'restore drill default log directory is not dedicated'
+grep -Fq 'deploy/tmpfiles.d/avelren-restore.conf' "$documentation" ||
+  fail 'restore tmpfiles install source is undocumented'
+grep -Fq 'systemd-tmpfiles --create /etc/tmpfiles.d/avelren-restore.conf' "$documentation" ||
+  fail 'restore tmpfiles provisioning command is undocumented'
+grep -Fq "stat -c '%U:%G:%a' /var/log/avelren" "$documentation" ||
+  fail 'restore log directory validation is undocumented'
+pass restore-log-directory-provisioned
 
 compose_file="$test_root/compose.yml"
 env_file="$test_root/environment"
@@ -504,7 +535,7 @@ reset_case() {
   printf '%s\n' 'sentinel-unchanged' >"$sentinel"
   output="$("${root_runner[@]}" find "$production_tmp" -mindepth 1 -print -quit)"
   [ -z "$output" ] || fail 'previous restore case left temporary state'
-  case "$production_log_root" in "$test_root"/production-log) ;; *) fail 'unsafe production log test path' ;; esac
+  case "$production_log_root" in "$tmpfiles_root"/var/log/avelren) ;; *) fail 'unsafe production log test path' ;; esac
   "${root_runner[@]}" rm -rf -- "$production_log_root"
   "${root_runner[@]}" install -d -o root -g root -m 700 "$production_log_root"
 }
@@ -581,6 +612,19 @@ remove_preserved_restore_root() {
   "${root_runner[@]}" rm -rf -- "$path"
 }
 
+assert_unsafe_log_rejected() {
+  local label="$1" output_log="$2" status
+  status="$(run_restore one "$output_log")"
+  assert_status 1 "$status" "$label-status"
+  [ "$(grep -Fxc 'Restore log directory is unsafe.' "$output_log" || true)" -eq 1 ] ||
+    fail "$label diagnostic was not exact"
+  [ ! -s "$restic_proof" ] || fail "$label reached Restic restore"
+  [ ! -s "$database_state" ] || fail "$label reached a database action"
+  assert_runtime_empty "$label-cleanup"
+  assert_no_secret "$output_log" "$label-redaction"
+  pass "$label"
+}
+
 reset_case
 success_log="$log_root/restore-success.log"
 success_status="$(run_restore one "$success_log")"
@@ -594,7 +638,43 @@ assert_host_restore_absent restore-success-host-route
 assert_runtime_empty restore-success-cleanup
 assert_no_secret "$success_log" restore-success-redaction
 assert_not_contains "$success_log" 'Temporary restore database cleanup failed' restore-success-cleanup-diagnostic
+internal_log_path="$("${root_runner[@]}" find "$production_log_root" -mindepth 1 -maxdepth 1 -type f \
+  -name 'avelren-restore-drill.*.log' -print -quit)"
+[ -n "$internal_log_path" ] || fail 'restore success internal log was absent'
+[ "$("${root_runner[@]}" find "$production_log_root" -mindepth 1 -maxdepth 1 -type f \
+  -name 'avelren-restore-drill.*.log' -printf '.' | wc -c)" -eq 1 ] || fail 'restore success internal log count was not one'
+[ "$("${root_runner[@]}" stat -c '%u:%g:%a' "$internal_log_path")" = 0:0:600 ] ||
+  fail 'restore success internal log was not root:root 0600'
+[ "$("${root_runner[@]}" stat -c '%d:%i:%u:%g:%a' "$ubuntu_log_root")" = "$ubuntu_log_root_identity" ] ||
+  fail 'restore success changed the Ubuntu-style shared log directory'
 pass restore-route-success
+pass restore-dedicated-log-under-ubuntu-style-var-log
+pass restore-log-file-root-only
+
+reset_case
+symlink_log_target="$fixture_root/restore-log-symlink-target"
+mkdir -m 700 "$symlink_log_target"
+symlink_log_target_identity="$(stat -c '%d:%i:%u:%g:%a' "$symlink_log_target")"
+"${root_runner[@]}" rm -rf -- "$production_log_root"
+"${root_runner[@]}" ln -s "$symlink_log_target" "$production_log_root"
+assert_unsafe_log_rejected restore-log-symlink-rejected "$log_root/restore-log-symlink.log"
+"${root_runner[@]}" test -L "$production_log_root" || fail 'restore log symlink was replaced'
+[ "$(stat -c '%d:%i:%u:%g:%a' "$symlink_log_target")" = "$symlink_log_target_identity" ] ||
+  fail 'restore log symlink target metadata changed'
+
+reset_case
+"${root_runner[@]}" chown 65534:root "$production_log_root"
+wrong_owner_log_identity="$("${root_runner[@]}" stat -c '%d:%i:%u:%g:%a' "$production_log_root")"
+assert_unsafe_log_rejected restore-log-wrong-owner-rejected "$log_root/restore-log-wrong-owner.log"
+[ "$("${root_runner[@]}" stat -c '%d:%i:%u:%g:%a' "$production_log_root")" = "$wrong_owner_log_identity" ] ||
+  fail 'restore wrong-owner log directory was repaired'
+
+reset_case
+"${root_runner[@]}" chmod 0770 "$production_log_root"
+writable_log_identity="$("${root_runner[@]}" stat -c '%d:%i:%u:%g:%a' "$production_log_root")"
+assert_unsafe_log_rejected restore-log-writable-rejected "$log_root/restore-log-writable.log"
+[ "$("${root_runner[@]}" stat -c '%d:%i:%u:%g:%a' "$production_log_root")" = "$writable_log_identity" ] ||
+  fail 'restore writable log directory was repaired'
 
 reset_case
 mutable_log="$log_root/restore-mutable-container.log"
