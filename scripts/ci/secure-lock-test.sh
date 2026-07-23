@@ -495,6 +495,21 @@ pass lock-30-collision-contract-preserved
 grep -Fxq 'RuntimeDirectory=avelren' "$backup_unit" || fail 'backup unit does not declare the exact runtime namespace'
 grep -Fxq 'RuntimeDirectoryMode=0700' "$backup_unit" || fail 'backup unit runtime mode is not 0700'
 grep -Fxq 'RuntimeDirectoryPreserve=yes' "$backup_unit" || fail 'backup unit does not preserve the shared namespace'
+
+# systemd creates StateDirectory before applying the service mount namespace.
+# These exact contracts cover a host where /var/lib/avelren-backup is absent.
+for unit in "$backup_unit" "$repo_check_unit"; do
+  grep -Fxq 'User=root' "$unit" || fail "$(basename "$unit") state directory owner is not root"
+  grep -Fxq 'Group=root' "$unit" || fail "$(basename "$unit") state directory group is not root"
+  path_token_present "$unit" StateDirectory avelren-backup ||
+    fail "$(basename "$unit") does not provision the backup state directory"
+  grep -Fxq 'StateDirectoryMode=0700' "$unit" ||
+    fail "$(basename "$unit") backup state directory mode is not 0700"
+  path_token_present "$unit" ReadWritePaths /var/lib/avelren-backup ||
+    fail "$(basename "$unit") does not retain explicit state-directory write access"
+done
+pass state-01-absent-backup-directory-provisioned
+
 path_token_absent "$backup_unit" ReadWritePaths /run/lock || fail 'backup unit grants broad /run/lock write access'
 path_token_absent "$repo_check_unit" ReadWritePaths /run/lock || fail 'repo-check unit grants broad /run/lock write access'
 pass lock-31-systemd-no-global-lock-write
