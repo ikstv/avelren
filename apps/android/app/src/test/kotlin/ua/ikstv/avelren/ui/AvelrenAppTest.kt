@@ -101,4 +101,25 @@ class AvelrenAppTest {
     fun `freshness label uses localized resource for unknown`() {
         assertEquals(R.string.snapshot_freshness_unknown, freshnessLabelResource(WorkloadFreshness.UNKNOWN))
     }
+
+    @Test
+    fun `freshness warning absent for fresh status`() {
+        assertEquals(null, freshnessWarningResource(WorkloadFreshness.FRESH))
+    }
+
+    @Test
+    fun `freshness warning for stale status`() {
+        assertEquals(
+            R.string.snapshot_freshness_stale_warning,
+            freshnessWarningResource(WorkloadFreshness.STALE),
+        )
+    }
+
+    @Test
+    fun `freshness warning for unknown status`() {
+        assertEquals(
+            R.string.snapshot_freshness_unknown_warning,
+            freshnessWarningResource(WorkloadFreshness.UNKNOWN),
+        )
+    }
 }

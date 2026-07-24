@@ -66,6 +66,12 @@ internal fun freshnessLabelResource(freshness: WorkloadFreshness): Int = when (f
     WorkloadFreshness.UNKNOWN -> R.string.snapshot_freshness_unknown
 }
 
+internal fun freshnessWarningResource(freshness: WorkloadFreshness): Int? = when (freshness) {
+    WorkloadFreshness.FRESH -> null
+    WorkloadFreshness.STALE -> R.string.snapshot_freshness_stale_warning
+    WorkloadFreshness.UNKNOWN -> R.string.snapshot_freshness_unknown_warning
+}
+
 @Composable
 fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
     MaterialTheme {
@@ -113,6 +119,13 @@ fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
                             style = MaterialTheme.typography.bodyLarge,
                         )
                         Spacer(modifier = Modifier.height(8.dp))
+                        freshnessWarningResource(renderState.snapshot.freshness)?.let { warningRes ->
+                            Text(
+                                text = stringResource(warningRes),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
                         Text(
                             text = stringResource(
                                 R.string.snapshot_sequence,
