@@ -15,7 +15,7 @@ class NotificationPolicyTest {
     @Test fun `request code is stable, event based and non-negative`() {
         val requestCode = stableNotificationRequestCode("event-id-1")
         assertEquals(requestCode, stableNotificationRequestCode("event-id-1"))
-        assertEquals(-1, requestCode and Int.MIN_VALUE)
+        assertEquals(0, requestCode and Int.MIN_VALUE)
         assertTrue(requestCode != stableNotificationRequestCode("event-id-2"))
     }
 
