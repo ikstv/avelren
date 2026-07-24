@@ -24,7 +24,7 @@ import java.time.format.DateTimeFormatter
 import ua.ikstv.avelren.R
 import ua.ikstv.avelren.domain.WorkloadSnapshot
 
-private val receivedAtFormatter: DateTimeFormatter = DateTimeFormatter
+private val workloadTimestampFormatter: DateTimeFormatter = DateTimeFormatter
     .ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'")
     .withZone(ZoneOffset.UTC)
 
@@ -43,7 +43,11 @@ internal fun mapWorkloadRenderState(state: WorkloadUiState): WorkloadRenderState
 internal fun shouldShowDemoIndicator(state: WorkloadRenderState): Boolean =
     state is WorkloadRenderState.Success && state.snapshot.isDemo
 
-internal fun formatReceivedAt(receivedAt: Instant): String = receivedAtFormatter.format(receivedAt)
+private fun formatWorkloadTimestamp(timestamp: Instant): String = workloadTimestampFormatter.format(timestamp)
+
+internal fun formatReceivedAt(receivedAt: Instant): String = formatWorkloadTimestamp(receivedAt)
+
+internal fun formatObservedAt(observedAt: Instant): String = formatWorkloadTimestamp(observedAt)
 
 @Composable
 fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
@@ -96,6 +100,14 @@ fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
                             text = stringResource(
                                 R.string.snapshot_sequence,
                                 renderState.snapshot.sequence,
+                            ),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = stringResource(
+                                R.string.snapshot_observed,
+                                formatObservedAt(renderState.snapshot.observedAt),
                             ),
                             style = MaterialTheme.typography.bodyLarge,
                         )
