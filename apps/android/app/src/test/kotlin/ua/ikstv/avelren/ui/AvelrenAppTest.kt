@@ -57,4 +57,9 @@ class AvelrenAppTest {
         val state = mapWorkloadRenderState(WorkloadUiState.Success(liveSnapshot))
         assertTrue(!shouldShowDemoIndicator(state))
     }
+
+    @Test
+    fun `format received time is UTC deterministic`() {
+        assertEquals("2026-07-20 08:00:01 UTC", formatReceivedAt(demoSnapshot.receivedAt))
+    }
 }
