@@ -18,6 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -48,6 +49,15 @@ private fun formatWorkloadTimestamp(timestamp: Instant): String = workloadTimest
 internal fun formatReceivedAt(receivedAt: Instant): String = formatWorkloadTimestamp(receivedAt)
 
 internal fun formatObservedAt(observedAt: Instant): String = formatWorkloadTimestamp(observedAt)
+
+internal fun formatDeliveryDelaySeconds(observedAt: Instant, receivedAt: Instant): Long? {
+    val delaySeconds = Duration.between(observedAt, receivedAt).seconds
+    return if (delaySeconds >= 0L) {
+        delaySeconds
+    } else {
+        null
+    }
+}
 
 @Composable
 fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
@@ -119,6 +129,22 @@ fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
                             ),
                             style = MaterialTheme.typography.bodyLarge,
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        val delaySeconds = formatDeliveryDelaySeconds(
+                            renderState.snapshot.observedAt,
+                            renderState.snapshot.receivedAt,
+                        )
+                        if (delaySeconds != null) {
+                            Text(
+                                text = stringResource(R.string.snapshot_delay_seconds, delaySeconds),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        } else {
+                            Text(
+                                text = stringResource(R.string.snapshot_delay_unknown),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        }
                         if (shouldShowDemoIndicator(renderState)) {
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(

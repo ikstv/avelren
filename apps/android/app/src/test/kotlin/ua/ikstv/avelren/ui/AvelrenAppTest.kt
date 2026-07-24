@@ -67,4 +67,22 @@ class AvelrenAppTest {
     fun `format observed time is UTC deterministic`() {
         assertEquals("2026-07-20 08:00:00 UTC", formatObservedAt(demoSnapshot.observedAt))
     }
+
+    @Test
+    fun `format delivery delay returns seconds`() {
+        val delay = formatDeliveryDelaySeconds(
+            Instant.parse("2026-07-20T08:00:00Z"),
+            Instant.parse("2026-07-20T08:00:05Z"),
+        )
+        assertEquals(5L, delay)
+    }
+
+    @Test
+    fun `format delivery delay is unknown when received before observed`() {
+        val delay = formatDeliveryDelaySeconds(
+            Instant.parse("2026-07-20T08:00:05Z"),
+            Instant.parse("2026-07-20T08:00:00Z"),
+        )
+        assertEquals(null, delay)
+    }
 }
