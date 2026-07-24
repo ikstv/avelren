@@ -5,7 +5,6 @@ import javax.xml.parsers.DocumentBuilderFactory
 import org.junit.Test
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.w3c.dom.Document
 import org.w3c.dom.Element
 
@@ -72,8 +71,11 @@ class StringResourcesParityTest {
 
     private fun resolveResourceFile(resourcePath: String): File {
         val candidates = listOf(
+            File("src/main/res/$resourcePath"),
             File("apps/android/app/src/main/res/$resourcePath"),
             File("app/src/main/res/$resourcePath"),
+            File("../app/src/main/res/$resourcePath"),
+            File("../apps/android/app/src/main/res/$resourcePath"),
             File("./$resourcePath"),
         )
 
