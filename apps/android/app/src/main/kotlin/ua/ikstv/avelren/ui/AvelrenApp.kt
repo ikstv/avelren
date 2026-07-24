@@ -18,8 +18,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import ua.ikstv.avelren.R
 import ua.ikstv.avelren.domain.WorkloadSnapshot
+
+private val receivedAtFormatter: DateTimeFormatter = DateTimeFormatter
+    .ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'")
+    .withZone(ZoneOffset.UTC)
 
 internal sealed interface WorkloadRenderState {
     data object Loading : WorkloadRenderState
@@ -35,6 +42,8 @@ internal fun mapWorkloadRenderState(state: WorkloadUiState): WorkloadRenderState
 
 internal fun shouldShowDemoIndicator(state: WorkloadRenderState): Boolean =
     state is WorkloadRenderState.Success && state.snapshot.isDemo
+
+internal fun formatReceivedAt(receivedAt: Instant): String = receivedAtFormatter.format(receivedAt)
 
 @Composable
 fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
@@ -87,6 +96,14 @@ fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
                             text = stringResource(
                                 R.string.snapshot_sequence,
                                 renderState.snapshot.sequence,
+                            ),
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = stringResource(
+                                R.string.snapshot_received,
+                                formatReceivedAt(renderState.snapshot.receivedAt),
                             ),
                             style = MaterialTheme.typography.bodyLarge,
                         )
