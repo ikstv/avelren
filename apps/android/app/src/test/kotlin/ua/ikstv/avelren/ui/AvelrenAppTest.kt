@@ -1,9 +1,8 @@
 package ua.ikstv.avelren.ui
 
 import java.time.Instant
-import kotlin.test.assertEquals
-import kotlin.test.assertIs
-import kotlin.test.assertTrue
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import ua.ikstv.avelren.domain.WorkloadFreshness
 import ua.ikstv.avelren.domain.WorkloadSnapshot
@@ -22,21 +21,22 @@ class AvelrenAppTest {
     @Test
     fun `loading maps to loading render state`() {
         val state = mapWorkloadRenderState(WorkloadUiState.Loading)
-        assertIs<WorkloadRenderState.Loading>(state)
+        assertTrue(state is WorkloadRenderState.Loading)
     }
 
     @Test
     fun `success maps to snapshot render state`() {
         val state = mapWorkloadRenderState(WorkloadUiState.Success(demoSnapshot))
 
-        assertIs<WorkloadRenderState.Success>(state)
+        assertTrue(state is WorkloadRenderState.Success)
+        state as WorkloadRenderState.Success
         assertEquals(demoSnapshot, state.snapshot)
     }
 
     @Test
     fun `error maps to error render state`() {
         val state = mapWorkloadRenderState(WorkloadUiState.Error)
-        assertIs<WorkloadRenderState.Error>(state)
+        assertTrue(state is WorkloadRenderState.Error)
     }
 
     @Test
