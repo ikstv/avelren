@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import android.content.Intent
 
 class NotificationPolicyTest {
     @Test fun `notification id is stable and event based`() {
@@ -42,6 +43,13 @@ class NotificationPolicyTest {
             android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP,
             flags and android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP,
         )
+    }
+
+    @Test fun `notification action refresh helper handles exact action`() {
+        assertTrue(shouldRefreshFromNotificationAction(OPEN_FROM_NOTIFICATION_ACTION))
+        assertFalse(shouldRefreshFromNotificationAction(Intent.ACTION_MAIN))
+        assertFalse(shouldRefreshFromNotificationAction("ua.ikstv.avelren.action.SOME_OTHER"))
+        assertFalse(shouldRefreshFromNotificationAction(null))
     }
 
     @Test fun `local deduplicator marks a displayed event once`() {

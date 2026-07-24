@@ -1,6 +1,7 @@
 package ua.ikstv.avelren
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -14,9 +15,10 @@ import androidx.compose.runtime.getValue
 import ua.ikstv.avelren.repository.ApiWorkloadRepository
 import ua.ikstv.avelren.repository.WorkloadRepository
 import ua.ikstv.avelren.ui.WorkloadUiState
-import ua.ikstv.avelren.ui.WorkloadViewModel
 import ua.ikstv.avelren.ui.AvelrenApp
+import ua.ikstv.avelren.ui.WorkloadViewModel
 import ua.ikstv.avelren.push.shouldRequestNotificationPermission
+import ua.ikstv.avelren.push.shouldRefreshFromNotificationAction
 
 class MainActivity : ComponentActivity() {
     private val workloadRepository: WorkloadRepository = ApiWorkloadRepository()
@@ -30,6 +32,18 @@ class MainActivity : ComponentActivity() {
         setContent {
             val state: WorkloadUiState by workloadViewModel.state.collectAsStateWithLifecycle()
             AvelrenApp(state = state, onRetry = workloadViewModel::retry)
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNotificationIntent(intent)
+    }
+
+    private fun handleNotificationIntent(intent: Intent) {
+        if (shouldRefreshFromNotificationAction(intent.action)) {
+            workloadViewModel.retry()
         }
     }
 
