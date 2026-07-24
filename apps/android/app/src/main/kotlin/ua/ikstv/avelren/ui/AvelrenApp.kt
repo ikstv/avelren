@@ -1,15 +1,21 @@
 package ua.ikstv.avelren.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -83,145 +89,191 @@ internal fun freshnessWarningResource(freshness: WorkloadFreshness): Int? = when
 @Composable
 fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
     MaterialTheme {
-        Surface(modifier = Modifier.fillMaxSize()) {
-            Column(
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+        ) {
+            Box(
                 modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally,
+                contentAlignment = Alignment.TopCenter,
             ) {
-                Text(
-                    text = stringResource(R.string.placeholder_title),
-                    style = MaterialTheme.typography.headlineMedium,
-                    modifier = Modifier.padding(PaddingValues(bottom = 12.dp)),
-                )
                 when (val renderState = mapWorkloadRenderState(state)) {
-                    WorkloadRenderState.Loading -> {
+                    WorkloadRenderState.Loading -> CenteredState {
                         Text(
                             text = stringResource(R.string.state_loading),
                             style = MaterialTheme.typography.bodyLarge,
                         )
                     }
 
-                    is WorkloadRenderState.Success -> {
-                        if (renderState.isRefreshing) {
-                            Text(
-                                text = stringResource(R.string.action_refreshing),
-                                style = MaterialTheme.typography.bodyLarge,
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                        }
-                        Text(
-                            text = stringResource(
-                                R.string.snapshot_location,
-                                renderState.snapshot.locationId,
-                            ),
-                            style = MaterialTheme.typography.bodyLarge,
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = stringResource(
-                                R.string.snapshot_vehicle_count,
-                                renderState.snapshot.vehicleCount,
-                            ),
-                            style = MaterialTheme.typography.bodyLarge,
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = stringResource(
-                                R.string.snapshot_freshness,
-                                stringResource(freshnessLabelResource(renderState.snapshot.freshness)),
-                            ),
-                            style = MaterialTheme.typography.bodyLarge,
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        freshnessWarningResource(renderState.snapshot.freshness)?.let { warningRes ->
-                            Text(
-                                text = stringResource(warningRes),
-                                style = MaterialTheme.typography.bodyLarge,
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                        }
-                        Text(
-                            text = stringResource(
-                                R.string.snapshot_sequence,
-                                renderState.snapshot.sequence,
-                            ),
-                            style = MaterialTheme.typography.bodyLarge,
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = stringResource(
-                                R.string.snapshot_observed,
-                                formatObservedAt(renderState.snapshot.observedAt),
-                            ),
-                            style = MaterialTheme.typography.bodyLarge,
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = stringResource(
-                                R.string.snapshot_received,
-                                formatReceivedAt(renderState.snapshot.receivedAt),
-                            ),
-                            style = MaterialTheme.typography.bodyLarge,
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        val delaySeconds = formatDeliveryDelaySeconds(
-                            renderState.snapshot.observedAt,
-                            renderState.snapshot.receivedAt,
-                        )
-                        if (delaySeconds != null) {
-                            Text(
-                                text = stringResource(R.string.snapshot_delay_seconds, delaySeconds),
-                                style = MaterialTheme.typography.bodyLarge,
-                            )
-                        } else {
-                            Text(
-                                text = stringResource(R.string.snapshot_delay_unknown),
-                                style = MaterialTheme.typography.bodyLarge,
-                            )
-                        }
-                        if (shouldShowDemoIndicator(renderState)) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = stringResource(R.string.snapshot_demo),
-                                style = MaterialTheme.typography.bodyLarge,
-                            )
-                        }
-                        if (renderState.refreshFailed) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = stringResource(R.string.state_refresh_failed),
-                                style = MaterialTheme.typography.bodyLarge,
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Button(
-                            onClick = onRetry,
-                            enabled = !renderState.isRefreshing,
-                            modifier = Modifier.fillMaxWidth(0.5f),
-                        ) {
-                            Text(
-                                text = if (renderState.isRefreshing) {
-                                    stringResource(R.string.action_refreshing)
-                                } else {
-                                    stringResource(R.string.action_refresh)
-                                },
-                            )
-                        }
-                    }
+                    is WorkloadRenderState.Success -> SuccessContent(
+                        renderState = renderState,
+                        onRetry = onRetry,
+                    )
 
-                    WorkloadRenderState.Error -> {
-                        Text(
-                            text = stringResource(R.string.state_error),
-                            style = MaterialTheme.typography.bodyLarge,
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Button(onClick = onRetry, modifier = Modifier.fillMaxWidth(0.5f)) {
-                            Text(text = stringResource(R.string.action_retry))
-                        }
-                    }
+                    WorkloadRenderState.Error -> ErrorContent(onRetry)
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CenteredState(content: @Composable () -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxSize(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(
+            text = stringResource(R.string.placeholder_title),
+            style = MaterialTheme.typography.headlineMedium,
+            modifier = Modifier.padding(PaddingValues(bottom = 12.dp)),
+        )
+        content()
+    }
+}
+
+@Composable
+private fun ErrorContent(onRetry: () -> Unit) {
+    CenteredState {
+        Text(
+            text = stringResource(R.string.state_error),
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        Button(onClick = onRetry, modifier = Modifier.fillMaxWidth(0.5f)) {
+            Text(text = stringResource(R.string.action_retry))
+        }
+    }
+}
+
+@Composable
+private fun SuccessContent(
+    renderState: WorkloadRenderState.Success,
+    onRetry: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(PaddingValues(bottom = 4.dp)),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Top,
+    ) {
+        Text(
+            text = stringResource(R.string.placeholder_title),
+            style = MaterialTheme.typography.headlineMedium,
+            modifier = Modifier.padding(PaddingValues(bottom = 12.dp)),
+        )
+
+        if (renderState.isRefreshing) {
+            Text(
+                text = stringResource(R.string.action_refreshing),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        Text(
+            text = stringResource(
+                R.string.snapshot_location,
+                renderState.snapshot.locationId,
+            ),
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = stringResource(
+                R.string.snapshot_vehicle_count,
+                renderState.snapshot.vehicleCount,
+            ),
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = stringResource(
+                R.string.snapshot_freshness,
+                stringResource(freshnessLabelResource(renderState.snapshot.freshness)),
+            ),
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        freshnessWarningResource(renderState.snapshot.freshness)?.let { warningRes ->
+            Text(
+                text = stringResource(warningRes),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+        Text(
+            text = stringResource(
+                R.string.snapshot_sequence,
+                renderState.snapshot.sequence,
+            ),
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = stringResource(
+                R.string.snapshot_observed,
+                formatObservedAt(renderState.snapshot.observedAt),
+            ),
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = stringResource(
+                R.string.snapshot_received,
+                formatReceivedAt(renderState.snapshot.receivedAt),
+            ),
+            style = MaterialTheme.typography.bodyLarge,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        val delaySeconds = formatDeliveryDelaySeconds(
+            renderState.snapshot.observedAt,
+            renderState.snapshot.receivedAt,
+        )
+        if (delaySeconds != null) {
+            Text(
+                text = stringResource(R.string.snapshot_delay_seconds, delaySeconds),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+        } else {
+            Text(
+                text = stringResource(R.string.snapshot_delay_unknown),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+        }
+        if (shouldShowDemoIndicator(renderState)) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = stringResource(R.string.snapshot_demo),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+        }
+        if (renderState.refreshFailed) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = stringResource(R.string.state_refresh_failed),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+        }
+        Spacer(modifier = Modifier.height(12.dp))
+        Button(
+            onClick = onRetry,
+            enabled = !renderState.isRefreshing,
+            modifier = Modifier.fillMaxWidth(0.5f),
+        ) {
+            Text(
+                text = if (renderState.isRefreshing) {
+                    stringResource(R.string.action_refreshing)
+                } else {
+                    stringResource(R.string.action_refresh)
+                },
+            )
+        }
+        Spacer(modifier = Modifier.height(4.dp))
     }
 }
