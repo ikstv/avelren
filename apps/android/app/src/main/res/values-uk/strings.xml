@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Avelren</string>
+    <string name="placeholder_title">Avelren</string>
+    <string name="placeholder_loading">Завантаження даних…</string>
+    <string name="state_loading">Завантаження даних…</string>
+    <string name="state_error">Не вдалося завантажити дані</string>
+    <string name="action_retry">Повторити</string>
+    <string name="action_refresh">Оновити</string>
+    <string name="action_refreshing">Оновлення…</string>
+    <string name="state_refresh_failed">Не вдалося оновити; показано останні дані</string>
+    <string name="snapshot_location">Місцезнаходження: %1$s</string>
+    <string name="snapshot_vehicle_count">Кількість авто: %1$d</string>
+    <string name="snapshot_freshness">Актуальність: %1$s</string>
+    <string name="snapshot_freshness_fresh">Актуальні</string>
+    <string name="snapshot_freshness_stale">Застарілі</string>
+    <string name="snapshot_freshness_unknown">Невідомо</string>
+    <string name="snapshot_freshness_stale_warning">Увага: дані застарілі</string>
+    <string name="snapshot_freshness_unknown_warning">Увага: актуальність невідома</string>
+    <string name="snapshot_sequence">Послідовність: %1$d</string>
+    <string name="snapshot_observed">Спостережено: %1$s</string>
+    <string name="snapshot_received">Отримано: %1$s</string>
+    <string name="snapshot_delay_seconds">Затримка: %1$d с</string>
+    <string name="snapshot_delay_unknown">Затримка: невідома</string>
+    <string name="snapshot_demo">Демонстраційні дані</string>
+    <string name="push_notification_title">Оновлення Avelren</string>
+    <string name="push_notification_text">Досягнуто поріг %1$d; спостережена кількість %2$d</string>
+</resources>
