@@ -2,6 +2,8 @@ package ua.ikstv.avelren.push
 
 import android.Manifest
 import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -11,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import ua.ikstv.avelren.MainActivity
 import ua.ikstv.avelren.R
 
 class AvelrenMessagingService : FirebaseMessagingService() {
@@ -30,11 +33,22 @@ class AvelrenMessagingService : FirebaseMessagingService() {
         if (!deduplicator.isNew(payload.eventId)) return
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED) return
+        val openIntent = Intent(this, MainActivity::class.java).apply {
+            flags = notificationActivityFlags()
+        }
+        val contentIntent = PendingIntent.getActivity(
+            this,
+            stableNotificationRequestCode(payload.eventId),
+            openIntent,
+            notificationPendingIntentFlags(),
+        )
         val notification = NotificationCompat.Builder(this, AvelrenApplication.CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(getString(R.string.push_notification_title))
-            .setContentText(getString(R.string.push_notification_text,
-                payload.threshold, payload.observedCount)).setAutoCancel(true).build()
+            .setContentText(getString(R.string.push_notification_text, payload.threshold, payload.observedCount))
+            .setContentIntent(contentIntent)
+            .setAutoCancel(true)
+            .build()
         getSystemService(NotificationManager::class.java)
             .notify(stableNotificationId(payload.eventId), notification)
         deduplicator.markDisplayed(payload.eventId)
