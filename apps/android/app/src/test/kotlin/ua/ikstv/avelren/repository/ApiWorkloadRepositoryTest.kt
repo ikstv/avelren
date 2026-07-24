@@ -33,6 +33,47 @@ class ApiWorkloadRepositoryTest {
     }
 
     @Test
+    fun `rejects payload missing required fields`() {
+        val payload = """
+            {
+              "vehicleCount": 123,
+              "observedAt": "2026-07-20T08:00:00.000Z",
+              "receivedAt": "2026-07-20T08:00:01.000Z",
+              "freshness": "fresh",
+              "sequence": 42
+            }
+        """.trimIndent()
+        val repository = repositoryOf(payload, "application/json")
+
+        val error = runBlocking {
+            runCatching { repository.getLatest() }.exceptionOrNull()
+        }
+
+        assertTrue(error is ApiWorkloadResponseException)
+    }
+
+    @Test
+    fun `rejects payload with wrong field type`() {
+        val payload = """
+            {
+              "locationId": "demo",
+              "vehicleCount": "not-a-number",
+              "observedAt": "2026-07-20T08:00:00.000Z",
+              "receivedAt": "2026-07-20T08:00:01.000Z",
+              "freshness": "fresh",
+              "sequence": 42
+            }
+        """.trimIndent()
+        val repository = repositoryOf(payload, "application/json")
+
+        val error = runBlocking {
+            runCatching { repository.getLatest() }.exceptionOrNull()
+        }
+
+        assertTrue(error is ApiWorkloadResponseException)
+    }
+
+    @Test
     fun `returns error for http errors`() {
         val repository = repositoryOf(
             body = "{}",
