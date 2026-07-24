@@ -171,6 +171,149 @@ class WorkloadViewModelTest {
     }
 
     @Test
+    fun `retry from success keeps previous snapshot while refreshing`() = runTest {
+        val secondSnapshot = defaultSnapshot.copy(sequence = 2L)
+        val repository = TimedWorkloadRepository(
+            listOf(Result.success(defaultSnapshot), Result.success(secondSnapshot)),
+            delaysMs = listOf(0L, 500L),
+        )
+        val loadDispatcher = StandardTestDispatcher(testScheduler)
+        val ioDispatcher = StandardTestDispatcher(testScheduler)
+        val viewModel = WorkloadViewModel(
+            repository,
+            ioDispatcher = ioDispatcher,
+            loadDispatcher = loadDispatcher,
+        )
+
+        advanceUntilIdle()
+        assertEquals(
+            WorkloadUiState.Success(defaultSnapshot),
+            viewModel.state.value,
+        )
+
+        viewModel.retry()
+        runCurrent()
+        val refreshingState = viewModel.state.value
+        assertEquals(
+            WorkloadUiState.Success(defaultSnapshot, isRefreshing = true, refreshFailed = false),
+            refreshingState,
+        )
+
+        advanceUntilIdle()
+        assertEquals(
+            WorkloadUiState.Success(secondSnapshot, isRefreshing = false, refreshFailed = false),
+            viewModel.state.value,
+        )
+    }
+
+    @Test
+    fun `retry from success preserves snapshot and marks refresh failure`() = runTest {
+        val repository = TimedWorkloadRepository(
+            listOf(
+                Result.success(defaultSnapshot),
+                Result.failure(IllegalStateException("boom")),
+            ),
+            delaysMs = listOf(0L, 500L),
+        )
+        val loadDispatcher = StandardTestDispatcher(testScheduler)
+        val ioDispatcher = StandardTestDispatcher(testScheduler)
+        val viewModel = WorkloadViewModel(
+            repository,
+            ioDispatcher = ioDispatcher,
+            loadDispatcher = loadDispatcher,
+        )
+
+        advanceUntilIdle()
+        assertEquals(
+            WorkloadUiState.Success(defaultSnapshot),
+            viewModel.state.value,
+        )
+
+        viewModel.retry()
+        runCurrent()
+        val refreshingState = viewModel.state.value
+        assertEquals(
+            WorkloadUiState.Success(defaultSnapshot, isRefreshing = true, refreshFailed = false),
+            refreshingState,
+        )
+
+        advanceUntilIdle()
+        assertEquals(
+            WorkloadUiState.Success(defaultSnapshot, isRefreshing = false, refreshFailed = true),
+            viewModel.state.value,
+        )
+    }
+
+    @Test
+    fun `refresh failure can be retried and clears refresh failure`() = runTest {
+        val secondSnapshot = defaultSnapshot.copy(sequence = 3L)
+        val repository = TimedWorkloadRepository(
+            listOf(
+                Result.success(defaultSnapshot),
+                Result.failure(IllegalStateException("boom")),
+                Result.success(secondSnapshot),
+            ),
+            delaysMs = listOf(0L, 500L, 0L),
+        )
+        val loadDispatcher = StandardTestDispatcher(testScheduler)
+        val ioDispatcher = StandardTestDispatcher(testScheduler)
+        val viewModel = WorkloadViewModel(
+            repository,
+            ioDispatcher = ioDispatcher,
+            loadDispatcher = loadDispatcher,
+        )
+
+        advanceUntilIdle()
+        viewModel.retry()
+        advanceUntilIdle()
+        assertEquals(
+            WorkloadUiState.Success(defaultSnapshot, isRefreshing = false, refreshFailed = true),
+            viewModel.state.value,
+        )
+
+        viewModel.retry()
+        advanceUntilIdle()
+        assertEquals(
+            WorkloadUiState.Success(secondSnapshot, isRefreshing = false, refreshFailed = false),
+            viewModel.state.value,
+        )
+    }
+
+    @Test
+    fun `duplicate retries during refresh are ignored`() = runTest {
+        val repository = TimedWorkloadRepository(
+            listOf(
+                Result.success(defaultSnapshot),
+                Result.success(defaultSnapshot.copy(sequence = 2L)),
+            ),
+            delaysMs = listOf(0L, 500L),
+        )
+        val loadDispatcher = StandardTestDispatcher(testScheduler)
+        val ioDispatcher = StandardTestDispatcher(testScheduler)
+        val viewModel = WorkloadViewModel(
+            repository,
+            ioDispatcher = ioDispatcher,
+            loadDispatcher = loadDispatcher,
+        )
+
+        advanceUntilIdle()
+        viewModel.retry()
+        viewModel.retry()
+        viewModel.retry()
+        advanceUntilIdle()
+
+        assertEquals(2, repository.calls)
+        assertEquals(
+            WorkloadUiState.Success(
+                defaultSnapshot.copy(sequence = 2L),
+                isRefreshing = false,
+                refreshFailed = false,
+            ),
+            viewModel.state.value,
+        )
+    }
+
+    @Test
     fun `repository is never called on main dispatcher`() = runTest {
         val loadDispatcher = StandardTestDispatcher(testScheduler)
         val ioDispatcher = StandardTestDispatcher(testScheduler)
@@ -223,6 +366,27 @@ private class SequencedWorkloadRepository(private val responses: List<Result<Wor
         calls++
         val response = responses[responseIndex]
         responseIndex = (responseIndex + 1).coerceAtMost(responses.lastIndex)
+        return response.getOrThrow()
+    }
+}
+
+private class TimedWorkloadRepository(
+    private val responses: List<Result<WorkloadSnapshot>>,
+    private val delaysMs: List<Long> = emptyList(),
+) : WorkloadRepository {
+    var calls = 0
+        private set
+
+    private var responseIndex = 0
+
+    override suspend fun getLatest(): WorkloadSnapshot {
+        calls++
+        val response = responses[responseIndex]
+        val delayMs = delaysMs.getOrElse(responseIndex) { 0L }
+        responseIndex = (responseIndex + 1).coerceAtMost(responses.lastIndex)
+        if (delayMs > 0) {
+            delay(delayMs)
+        }
         return response.getOrThrow()
     }
 }
