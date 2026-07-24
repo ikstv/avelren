@@ -13,6 +13,8 @@
     <string name="snapshot_freshness_fresh">Актуальні / Fresh</string>
     <string name="snapshot_freshness_stale">Застарілі / Stale</string>
     <string name="snapshot_freshness_unknown">Невідомо / Unknown</string>
+    <string name="snapshot_freshness_stale_warning">Увага: дані застарілі / Warning: data is stale</string>
+    <string name="snapshot_freshness_unknown_warning">Увага: актуальність невідома / Warning: freshness is unknown</string>
     <string name="snapshot_sequence">Sequence: %1$d</string>
     <string name="snapshot_observed">Спостережено: %1$s / Observed: %1$s</string>
     <string name="snapshot_received">Отримано: %1$s / Received: %1$s</string>
