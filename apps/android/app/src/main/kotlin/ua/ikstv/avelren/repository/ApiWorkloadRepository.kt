@@ -95,7 +95,7 @@ class ApiWorkloadRepository(
                 }
                 output.write(buffer, 0, read)
             }
-            return output.toString(StandardCharsets.UTF_8)
+            return String(output.toByteArray(), StandardCharsets.UTF_8)
         }
     }
 

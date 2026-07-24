@@ -199,7 +199,7 @@ jobs:
 
       - name: Запустити unit-тести / Run unit tests
         working-directory: apps/android
-        run: ./gradlew --no-daemon test
+        run: ./gradlew --no-daemon test lint assembleDebug
 
   compose:
     name: Production Compose
