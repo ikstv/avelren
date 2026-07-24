@@ -17,6 +17,18 @@ fun stableNotificationId(eventId: String): Int = ByteBuffer.wrap(
     MessageDigest.getInstance("SHA-256").digest(eventId.toByteArray(Charsets.UTF_8)),
 ).int
 
+fun stableNotificationRequestCode(eventId: String): Int = ByteBuffer.wrap(
+    MessageDigest.getInstance("SHA-256").digest(eventId.toByteArray(Charsets.UTF_8)),
+).int and Int.MAX_VALUE
+
+fun notificationActivityFlags(): Int =
+    android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or
+        android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+
+fun notificationPendingIntentFlags(): Int =
+    android.app.PendingIntent.FLAG_UPDATE_CURRENT or
+        android.app.PendingIntent.FLAG_IMMUTABLE
+
 fun shouldRequestNotificationPermission(
     sdkInt: Int,
     permissionGranted: Boolean,
