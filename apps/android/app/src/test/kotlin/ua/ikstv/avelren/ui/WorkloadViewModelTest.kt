@@ -140,6 +140,37 @@ class WorkloadViewModelTest {
     }
 
     @Test
+    fun `manual refresh after success performs another repository call`() = runTest {
+        val secondSnapshot = defaultSnapshot.copy(sequence = 2L)
+        val repository = SequencedWorkloadRepository(
+            listOf(Result.success(defaultSnapshot), Result.success(secondSnapshot)),
+        )
+        val loadDispatcher = StandardTestDispatcher(testScheduler)
+        val ioDispatcher = StandardTestDispatcher(testScheduler)
+        val viewModel = WorkloadViewModel(
+            repository,
+            ioDispatcher = ioDispatcher,
+            loadDispatcher = loadDispatcher,
+        )
+
+        advanceUntilIdle()
+        assertEquals(1, repository.calls)
+        assertEquals(
+            WorkloadUiState.Success(defaultSnapshot),
+            viewModel.state.value,
+        )
+
+        viewModel.retry()
+        advanceUntilIdle()
+
+        assertEquals(2, repository.calls)
+        assertEquals(
+            WorkloadUiState.Success(secondSnapshot),
+            viewModel.state.value,
+        )
+    }
+
+    @Test
     fun `repository is never called on main dispatcher`() = runTest {
         val loadDispatcher = StandardTestDispatcher(testScheduler)
         val ioDispatcher = StandardTestDispatcher(testScheduler)
