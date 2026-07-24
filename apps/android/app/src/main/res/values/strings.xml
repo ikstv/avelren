@@ -11,6 +11,7 @@
     <string name="snapshot_vehicle_count">Vehicle count: %1$d</string>
     <string name="snapshot_freshness">Freshness: %1$s</string>
     <string name="snapshot_sequence">Sequence: %1$d</string>
+    <string name="snapshot_demo">Демо-дані / Demo data</string>
     <string name="push_notification_title">Avelren update</string>
     <string name="push_notification_text">Threshold %1$d reached; observed count %2$d</string>
 </resources>

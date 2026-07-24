@@ -17,6 +17,7 @@ class AvelrenAppTest {
         sequence = 1L,
         isDemo = true,
     )
+    private val liveSnapshot = demoSnapshot.copy(isDemo = false)
 
     @Test
     fun `loading maps to loading render state`() {
@@ -43,5 +44,17 @@ class AvelrenAppTest {
     fun `loading contains no payload`() {
         val state = mapWorkloadRenderState(WorkloadUiState.Loading)
         assertTrue(state !is WorkloadRenderState.Success)
+    }
+
+    @Test
+    fun `demo snapshot shows indicator`() {
+        val state = mapWorkloadRenderState(WorkloadUiState.Success(demoSnapshot))
+        assertTrue(shouldShowDemoIndicator(state))
+    }
+
+    @Test
+    fun `live snapshot hides demo indicator`() {
+        val state = mapWorkloadRenderState(WorkloadUiState.Success(liveSnapshot))
+        assertTrue(!shouldShowDemoIndicator(state))
     }
 }

@@ -33,6 +33,9 @@ internal fun mapWorkloadRenderState(state: WorkloadUiState): WorkloadRenderState
     WorkloadUiState.Error -> WorkloadRenderState.Error
 }
 
+internal fun shouldShowDemoIndicator(state: WorkloadRenderState): Boolean =
+    state is WorkloadRenderState.Success && state.snapshot.isDemo
+
 @Composable
 fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
     MaterialTheme {
@@ -87,6 +90,13 @@ fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
                             ),
                             style = MaterialTheme.typography.bodyLarge,
                         )
+                        if (shouldShowDemoIndicator(renderState)) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = stringResource(R.string.snapshot_demo),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        }
                         Spacer(modifier = Modifier.height(12.dp))
                         Button(onClick = onRetry, modifier = Modifier.fillMaxWidth(0.5f)) {
                             Text(text = stringResource(R.string.action_refresh))
