@@ -32,13 +32,21 @@ private val workloadTimestampFormatter: DateTimeFormatter = DateTimeFormatter
 
 internal sealed interface WorkloadRenderState {
     data object Loading : WorkloadRenderState
-    data class Success(val snapshot: WorkloadSnapshot) : WorkloadRenderState
+    data class Success(
+        val snapshot: WorkloadSnapshot,
+        val isRefreshing: Boolean,
+        val refreshFailed: Boolean,
+    ) : WorkloadRenderState
     data object Error : WorkloadRenderState
 }
 
 internal fun mapWorkloadRenderState(state: WorkloadUiState): WorkloadRenderState = when (state) {
     WorkloadUiState.Loading -> WorkloadRenderState.Loading
-    is WorkloadUiState.Success -> WorkloadRenderState.Success(state.snapshot)
+    is WorkloadUiState.Success -> WorkloadRenderState.Success(
+        state.snapshot,
+        state.isRefreshing,
+        state.refreshFailed,
+    )
     WorkloadUiState.Error -> WorkloadRenderState.Error
 }
 
@@ -95,6 +103,13 @@ fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
                     }
 
                     is WorkloadRenderState.Success -> {
+                        if (renderState.isRefreshing) {
+                            Text(
+                                text = stringResource(R.string.action_refreshing),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
                         Text(
                             text = stringResource(
                                 R.string.snapshot_location,
@@ -172,9 +187,26 @@ fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
                                 style = MaterialTheme.typography.bodyLarge,
                             )
                         }
+                        if (renderState.refreshFailed) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = stringResource(R.string.state_refresh_failed),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        }
                         Spacer(modifier = Modifier.height(12.dp))
-                        Button(onClick = onRetry, modifier = Modifier.fillMaxWidth(0.5f)) {
-                            Text(text = stringResource(R.string.action_refresh))
+                        Button(
+                            onClick = onRetry,
+                            enabled = !renderState.isRefreshing,
+                            modifier = Modifier.fillMaxWidth(0.5f),
+                        ) {
+                            Text(
+                                text = if (renderState.isRefreshing) {
+                                    stringResource(R.string.action_refreshing)
+                                } else {
+                                    stringResource(R.string.action_refresh)
+                                },
+                            )
                         }
                     }
 

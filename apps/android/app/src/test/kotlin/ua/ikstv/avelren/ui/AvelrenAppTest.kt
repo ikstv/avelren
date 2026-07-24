@@ -2,6 +2,7 @@ package ua.ikstv.avelren.ui
 
 import java.time.Instant
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import ua.ikstv.avelren.R
@@ -33,6 +34,38 @@ class AvelrenAppTest {
         assertTrue(state is WorkloadRenderState.Success)
         state as WorkloadRenderState.Success
         assertEquals(demoSnapshot, state.snapshot)
+        assertFalse(state.isRefreshing)
+        assertFalse(state.refreshFailed)
+    }
+
+    @Test
+    fun `success render state preserves refreshing flag`() {
+        val state = mapWorkloadRenderState(
+            WorkloadUiState.Success(
+                snapshot = demoSnapshot,
+                isRefreshing = true,
+                refreshFailed = false,
+            ),
+        )
+        assertTrue(state is WorkloadRenderState.Success)
+        state as WorkloadRenderState.Success
+        assertEquals(true, state.isRefreshing)
+        assertEquals(false, state.refreshFailed)
+    }
+
+    @Test
+    fun `success render state preserves refresh failed flag`() {
+        val state = mapWorkloadRenderState(
+            WorkloadUiState.Success(
+                snapshot = demoSnapshot,
+                isRefreshing = false,
+                refreshFailed = true,
+            ),
+        )
+        assertTrue(state is WorkloadRenderState.Success)
+        state as WorkloadRenderState.Success
+        assertEquals(false, state.isRefreshing)
+        assertEquals(true, state.refreshFailed)
     }
 
     @Test

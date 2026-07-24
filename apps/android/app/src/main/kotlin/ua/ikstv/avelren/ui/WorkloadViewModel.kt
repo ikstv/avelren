@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ua.ikstv.avelren.domain.WorkloadSnapshot
 import ua.ikstv.avelren.repository.WorkloadRepository
 
 class WorkloadViewModel(
@@ -29,21 +30,52 @@ class WorkloadViewModel(
     }
 
     fun retry() {
-        load()
+        val currentState = _state.value
+        when (currentState) {
+            is WorkloadUiState.Success -> load(
+                preserveSnapshot = currentState.snapshot,
+            )
+            WorkloadUiState.Loading,
+            WorkloadUiState.Error -> load()
+        }
     }
 
     private fun load() {
+        loadFromSuccess(null)
+    }
+
+    private fun load(preserveSnapshot: WorkloadSnapshot?) {
+        loadFromSuccess(preserveSnapshot)
+    }
+
+    private fun loadFromSuccess(preserveSnapshot: WorkloadSnapshot?) {
         if (!loading.compareAndSet(false, true)) {
             return
         }
         viewModelScope.launch(loadDispatcher) {
-            _state.value = WorkloadUiState.Loading
+            if (preserveSnapshot != null) {
+                _state.value = WorkloadUiState.Success(
+                    snapshot = preserveSnapshot,
+                    isRefreshing = true,
+                    refreshFailed = false,
+                )
+            } else {
+                _state.value = WorkloadUiState.Loading
+            }
             _state.value = try {
                 WorkloadUiState.Success(withContext(ioDispatcher) {
                     workloadRepository.getLatest()
-                })
+                }, isRefreshing = false, refreshFailed = false)
             } catch (_: Exception) {
-                WorkloadUiState.Error
+                if (preserveSnapshot == null) {
+                    WorkloadUiState.Error
+                } else {
+                    WorkloadUiState.Success(
+                        snapshot = preserveSnapshot,
+                        isRefreshing = false,
+                        refreshFailed = true,
+                    )
+                }
             } finally {
                 loading.set(false)
             }

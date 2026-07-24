@@ -7,6 +7,8 @@
     <string name="state_error">Unable to load data</string>
     <string name="action_retry">Retry</string>
     <string name="action_refresh">Refresh</string>
+    <string name="action_refreshing">Оновлення… / Refreshing…</string>
+    <string name="state_refresh_failed">Не вдалося оновити; показано останні дані / Refresh failed; showing last data</string>
     <string name="snapshot_location">Location: %1$s</string>
     <string name="snapshot_vehicle_count">Vehicle count: %1$d</string>
     <string name="snapshot_freshness">Freshness: %1$s</string>
