@@ -34,6 +34,7 @@ class AvelrenMessagingService : FirebaseMessagingService() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED) return
         val openIntent = Intent(this, MainActivity::class.java).apply {
+            action = OPEN_FROM_NOTIFICATION_ACTION
             flags = notificationActivityFlags()
         }
         val contentIntent = PendingIntent.getActivity(

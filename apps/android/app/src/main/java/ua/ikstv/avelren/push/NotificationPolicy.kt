@@ -34,3 +34,8 @@ fun shouldRequestNotificationPermission(
     permissionGranted: Boolean,
     requestedBefore: Boolean,
 ): Boolean = sdkInt >= 33 && !permissionGranted && !requestedBefore
+
+const val OPEN_FROM_NOTIFICATION_ACTION =
+    "ua.ikstv.avelren.action.OPEN_FROM_NOTIFICATION"
+
+fun shouldRefreshFromNotificationAction(action: String?): Boolean = action == OPEN_FROM_NOTIFICATION_ACTION
