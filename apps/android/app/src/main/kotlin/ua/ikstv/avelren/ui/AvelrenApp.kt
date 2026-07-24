@@ -87,6 +87,10 @@ fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
                             ),
                             style = MaterialTheme.typography.bodyLarge,
                         )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(onClick = onRetry, modifier = Modifier.fillMaxWidth(0.5f)) {
+                            Text(text = stringResource(R.string.action_refresh))
+                        }
                     }
 
                     WorkloadRenderState.Error -> {
