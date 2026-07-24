@@ -33,6 +33,20 @@ class ApiWorkloadRepositoryTest {
     }
 
     @Test
+    fun `rejects non-json content type`() {
+        val repository = repositoryOf(
+            body = "{\"locationId\":\"demo\",\"vehicleCount\":123,\"observedAt\":\"2026-07-20T08:00:00.000Z\",\"receivedAt\":\"2026-07-20T08:00:01.000Z\",\"freshness\":\"fresh\",\"sequence\":1}",
+            contentType = "text/plain",
+        )
+
+        val error = runBlocking {
+            runCatching { repository.getLatest() }.exceptionOrNull()
+        }
+
+        assertTrue(error is ApiWorkloadContentTypeException)
+    }
+
+    @Test
     fun `rejects payload missing required fields`() {
         val payload = """
             {
