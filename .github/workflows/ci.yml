@@ -199,7 +199,22 @@ jobs:
 
       - name: Запустити unit-тести / Run unit tests
         working-directory: apps/android
-        run: ./gradlew --no-daemon test lint assembleDebug
+        run: |
+          ./gradlew --no-daemon test lint assembleDebug
+          test -f app/build/outputs/apk/debug/app-debug.apk
+          sha256sum app/build/outputs/apk/debug/app-debug.apk > app/build/outputs/apk/debug/app-debug.apk.sha256
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: avelren-debug-apk-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            apps/android/app/build/outputs/apk/debug/app-debug.apk
+            apps/android/app/build/outputs/apk/debug/app-debug.apk.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: false
 
   compose:
     name: Production Compose
