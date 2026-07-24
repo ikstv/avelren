@@ -16,9 +16,22 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import ua.ikstv.avelren.R
+import ua.ikstv.avelren.domain.WorkloadSnapshot
+
+internal sealed interface WorkloadRenderState {
+    data object Loading : WorkloadRenderState
+    data class Success(val snapshot: WorkloadSnapshot) : WorkloadRenderState
+    data object Error : WorkloadRenderState
+}
+
+internal fun mapWorkloadRenderState(state: WorkloadUiState): WorkloadRenderState = when (state) {
+    WorkloadUiState.Loading -> WorkloadRenderState.Loading
+    is WorkloadUiState.Success -> WorkloadRenderState.Success(state.snapshot)
+    WorkloadUiState.Error -> WorkloadRenderState.Error
+}
 
 @Composable
 fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
@@ -34,18 +47,19 @@ fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
                     style = MaterialTheme.typography.headlineMedium,
                     modifier = Modifier.padding(PaddingValues(bottom = 12.dp)),
                 )
-                when (state) {
-                    WorkloadUiState.Loading -> {
+                when (val renderState = mapWorkloadRenderState(state)) {
+                    WorkloadRenderState.Loading -> {
                         Text(
                             text = stringResource(R.string.state_loading),
                             style = MaterialTheme.typography.bodyLarge,
                         )
                     }
-                    is WorkloadUiState.Success -> {
+
+                    is WorkloadRenderState.Success -> {
                         Text(
                             text = stringResource(
                                 R.string.snapshot_location,
-                                state.snapshot.locationId,
+                                renderState.snapshot.locationId,
                             ),
                             style = MaterialTheme.typography.bodyLarge,
                         )
@@ -53,7 +67,7 @@ fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
                         Text(
                             text = stringResource(
                                 R.string.snapshot_vehicle_count,
-                                state.snapshot.vehicleCount,
+                                renderState.snapshot.vehicleCount,
                             ),
                             style = MaterialTheme.typography.bodyLarge,
                         )
@@ -61,17 +75,21 @@ fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
                         Text(
                             text = stringResource(
                                 R.string.snapshot_freshness,
-                                state.snapshot.freshness.name.lowercase(),
+                                renderState.snapshot.freshness.name.lowercase(),
                             ),
                             style = MaterialTheme.typography.bodyLarge,
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = stringResource(R.string.snapshot_sequence, state.snapshot.sequence),
+                            text = stringResource(
+                                R.string.snapshot_sequence,
+                                renderState.snapshot.sequence,
+                            ),
                             style = MaterialTheme.typography.bodyLarge,
                         )
                     }
-                    WorkloadUiState.Error -> {
+
+                    WorkloadRenderState.Error -> {
                         Text(
                             text = stringResource(R.string.state_error),
                             style = MaterialTheme.typography.bodyLarge,
