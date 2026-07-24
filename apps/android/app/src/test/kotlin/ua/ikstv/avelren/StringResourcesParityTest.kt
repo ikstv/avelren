@@ -25,8 +25,7 @@ class StringResourcesParityTest {
         val ukStrings = parseResourceStrings("values-uk/strings.xml")
 
         for ((key, defaultValue) in defaultStrings) {
-            val ukValue = ukStrings[key]
-            assertNotNull("Missing ukrainian string for key=$key", ukValue)
+            val ukValue = requireNotNull(ukStrings[key]) { "Missing ukrainian string for key=$key" }
             assertEquals(
                 "Placeholder signature mismatch for key=$key",
                 placeholderSignatures(defaultValue),
