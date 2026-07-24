@@ -23,6 +23,7 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import ua.ikstv.avelren.R
+import ua.ikstv.avelren.domain.WorkloadFreshness
 import ua.ikstv.avelren.domain.WorkloadSnapshot
 
 private val workloadTimestampFormatter: DateTimeFormatter = DateTimeFormatter
@@ -57,6 +58,12 @@ internal fun formatDeliveryDelaySeconds(observedAt: Instant, receivedAt: Instant
     } else {
         null
     }
+}
+
+internal fun freshnessLabelResource(freshness: WorkloadFreshness): Int = when (freshness) {
+    WorkloadFreshness.FRESH -> R.string.snapshot_freshness_fresh
+    WorkloadFreshness.STALE -> R.string.snapshot_freshness_stale
+    WorkloadFreshness.UNKNOWN -> R.string.snapshot_freshness_unknown
 }
 
 @Composable
@@ -101,7 +108,7 @@ fun AvelrenApp(state: WorkloadUiState, onRetry: () -> Unit) {
                         Text(
                             text = stringResource(
                                 R.string.snapshot_freshness,
-                                renderState.snapshot.freshness.name.lowercase(),
+                                stringResource(freshnessLabelResource(renderState.snapshot.freshness)),
                             ),
                             style = MaterialTheme.typography.bodyLarge,
                         )

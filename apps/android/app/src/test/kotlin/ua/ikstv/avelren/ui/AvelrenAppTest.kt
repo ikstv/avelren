@@ -85,4 +85,19 @@ class AvelrenAppTest {
         )
         assertEquals(null, delay)
     }
+
+    @Test
+    fun `freshness label uses localized resource for fresh`() {
+        assertEquals(R.string.snapshot_freshness_fresh, freshnessLabelResource(WorkloadFreshness.FRESH))
+    }
+
+    @Test
+    fun `freshness label uses localized resource for stale`() {
+        assertEquals(R.string.snapshot_freshness_stale, freshnessLabelResource(WorkloadFreshness.STALE))
+    }
+
+    @Test
+    fun `freshness label uses localized resource for unknown`() {
+        assertEquals(R.string.snapshot_freshness_unknown, freshnessLabelResource(WorkloadFreshness.UNKNOWN))
+    }
 }
